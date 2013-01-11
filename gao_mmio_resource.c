@@ -721,22 +721,59 @@ void	gao_delete_port_queues(struct gao_resources *resources, struct gao_port *in
 
 }
 
+
+static void	gao_free_egress_subqueue(struct gao_resources *resources, struct gao_egress_subqueue *subqueue) {
+	if(subqueue->ring) gao_free_descriptor_ring(resources, subqueue->ring);
+	subqueue->ring = NULL;
+}
+
 /**
  * Create the subqueues for an egress queue.
  * @warning Caller must hold resource lock
  * @param resources
  * @param port
  */
-static int64_t gao_create_egress_subqueues(struct gao_resources *resources, struct gao_queue *queue, uint64_t num_descriptors) {
+static void gao_free_egress_subqueues(struct gao_resources *resources, struct gao_queue *queue) {
+	int64_t index;
+	log_debug("Free subqueues for queue %p", queue);
+	if(!queue) return;
+	for(index = 0; index < GAO_MAX_PORT_SUBQUEUE; index++) {
+		gao_free_egress_subqueue(resources, &queue->subqueues[index]);
+	}
+}
+
+
+static int64_t	gao_create_egress_subqueue(struct gao_resources *resources, struct gao_egress_subqueue *subqueue, uint64_t num_descriptors) {
 	int64_t ret = 0;
 
-	queue->subqueues[0].ring = gao_create_descriptor_ring(resources, num_descriptors);
-	check_ptr(queue->subqueues[0].ring);
+	subqueue->ring = gao_create_descriptor_ring(resources, num_descriptors);
+	check_ptr_val(-ENOMEM, subqueue->ring);
 
-	//queue->subqueues[0].size
+
+	log_debug("Successfully created subqueue.");
+	return 0;
+	err:
+	gao_free_egress_subqueue(resources, subqueue);
+	return ret;
+}
+
+
+/**
+ * Create the subqueues for an egress queue.
+ * @warning Caller must hold resource lock
+ * @param resources
+ * @param port
+ */
+static int64_t gao_create_egress_subqueues(struct gao_resources *resources, struct gao_queue *queue) {
+	int64_t ret = 0, index;
+
+	//Create one default subqueue for now
+	ret = gao_create_egress_subqueue(resources, &queue->subqueues[0], queue->binding.port->num_rx_desc);
+	if(ret) gao_error("Failed to create subqueue. (ret=%ld)", (long)ret);
 
 	return 0;
 	err:
+	gao_free_egress_subqueues(resources, queue);
 	return ret;
 }
 
@@ -784,6 +821,8 @@ int64_t gao_create_port_queues(struct gao_resources* resources, struct gao_port 
 		queue->binding.gao_ifindex = port->gao_ifindex;
 		queue->binding.queue_index = index;
 		queue->binding.port = port;
+
+		gao_create_egress_subqueues(resources, queue);
 
 		queue->state = GAO_RESOURCE_STATE_ACTIVE;
 		port->tx_queues[index] = queue;

@@ -242,8 +242,8 @@ struct gao_descriptor_ring {
 
 struct gao_egress_subqueue {
 	struct gao_descriptor_ring	*ring;
-	uint64_t					size;
-	uint64_t					weight;
+//	uint64_t					size;
+//	uint64_t					weight;
 };
 
 struct gao_ingress_port_queue_map {
