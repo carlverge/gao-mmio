@@ -1,0 +1,11 @@
+*.o
+*.ko
+*.cmd
+*.cproject
+*.project
+*.order
+*.symvers
+*.mod.c
+*.mod
+*.supported
+tags
