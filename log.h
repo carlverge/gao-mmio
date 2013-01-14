@@ -77,7 +77,7 @@
 #endif
 
 #define check_ptr(PTR) if(PTR == NULL) { log_error("malloc Failed!"); goto err; }
-#define check_ptr_val(PTR, VAL) if(PTR == NULL) { ret = VAL; log_error("malloc Failed!"); goto err; }
+#define check_ptr_val(VAL, PTR) if(PTR == NULL) { ret = VAL; log_error("malloc Failed!"); goto err; }
 #ifdef GAO_USERSPACE
 #define free_null(PTR) { free(PTR); PTR = NULL; }
 #else

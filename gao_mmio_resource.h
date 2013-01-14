@@ -55,13 +55,16 @@ typedef enum gao_resource_state_t {
 	GAO_RESOURCE_STATE_FINAL,
 } gao_resource_state_t;
 
+typedef enum gao_dump_nested {
+	GAO_DUMP_NESTED = 0,
+	GAO_DUMP_TRUNCATED,
+} gao_dump_nested ;
 
 typedef enum gao_request_dump_t {
 	GAO_REQUEST_DUMP_BUFFERS = 0,
 	GAO_REQUEST_DUMP_DESCRIPTORS,
-	GAO_REQUEST_DUMP_USER_QUEUES,
-	GAO_REQUEST_DUMP_QUEUES,
-	GAO_REQUEST_DUMP_INTERFACES,
+	GAO_REQUEST_DUMP_PORTS,
+	GAO_REQUEST_DUMP_PORTS_NESTED,
 	GAO_REQUEST_DUMP_FILE,
 } gao_request_dump_t;
 
@@ -149,6 +152,17 @@ struct gao_descriptor_ring_header {
 #endif
 
 
+typedef enum gao_action_id {
+	GAO_ACTION_DROP = 0,
+	GAO_ACTION_FORWARD,
+} gao_action_id;
+
+struct 			gao_action {
+	uint8_t		action_id;
+	uint8_t		port_id;
+	uint8_t		queue_id;
+	uint8_t		padding;
+};
 
 
 
@@ -220,11 +234,6 @@ struct gao_descriptor_ring_control {
 
 };
 
-struct 			gao_action {
-	uint16_t	action_id;
-	uint8_t		port_id;
-	uint8_t		queue_id;
-};
 
 
 //Rings can be mapped to userspace
@@ -275,6 +284,8 @@ struct gao_queue {
 
 	//The mapping of port/queue id to egress queue.
 	struct gao_ingress_queue_map	queue_map;
+	//Pointer to a buffer of actions to map to packets to forward
+	struct gao_action				(*action_map)[];
 
 	//The queues used for SW QOS, just make rings, don't need full queue struct.
 	struct gao_egress_subqueue		subqueues[GAO_MAX_PORT_SUBQUEUE];
@@ -313,21 +324,28 @@ struct gao_port_ops {
 };
 
 
+typedef enum gao_port_qos_mode {
+	GAO_PORT_QOS_MODE_NONE = 0,
+	GAO_PORT_QOS_MODE_SW,
+	GAO_PORT_QOS_MODE_HW,
+} gao_port_qos_mode ;
+
 struct gao_port {
 	//TODO: Persistence: map an constant identifier like the HW address to the gao_ifindex
 	uint64_t				gao_ifindex; //gao internal gao_ifindex
 	uint64_t				ifindex; //Kernel ifindex
 	char					name[IFNAMSIZ];
 
-	//TODO: lock (Can we RCU?)
 	gao_resource_state_t 	state;
-	struct net_device		*netdev;
-	struct gao_port_ops		*port_ops;
-	uint32_t				num_rx_queues;
-	uint32_t				num_rx_desc;
+	struct net_device		*netdev; //Set by ethernet driver
+	struct gao_port_ops		*port_ops; //Set by ethernet driver
+
+	gao_port_qos_mode		qos_mode; //Set by ethernet driver
+	uint32_t				num_rx_queues; //Set by ethernet driver
+	uint32_t				num_rx_desc; //Set by ethernet driver
 	struct gao_queue		*rx_queues[GAO_MAX_PORT_HWQUEUE];
-	uint32_t				num_tx_queues;
-	uint32_t				num_tx_desc;
+	uint32_t				num_tx_queues; //Set by ethernet driver
+	uint32_t				num_tx_desc; //Set by ethernet driver
 	struct gao_queue		*tx_queues[GAO_MAX_PORT_HWQUEUE];
 };
 
@@ -459,14 +477,19 @@ inline struct gao_port* 	gao_get_port_from_ifindex(int ifindex);
 void	gao_dump_buffers(struct gao_resources *resources);
 void	gao_dump_descriptor(struct	gao_descriptor *desc);
 void	gao_dump_descriptors(struct gao_resources *resources);
+void	gao_dump_action(struct gao_action *action);
 void	gao_dump_descriptor_ring(struct gao_descriptor_ring *queue);
+void	gao_dump_descriptor_ring_nested(struct gao_descriptor_ring *ring);
 void	gao_dump_user_queues(struct gao_resources *resources);
 void	gao_dump_resources(struct gao_resources *resources);
+void	gao_dump_ingress_queue_map(struct gao_ingress_queue_map *map);
 void	gao_dump_queue_binding(struct gao_queue_binding *binding);
 void	gao_dump_queue(struct gao_queue *queue);
-void	gao_dump_queues(struct gao_resources *resources);
-void	gao_dump_interface(struct gao_port *port);
-void	gao_dump_interfaces(struct gao_resources *resources);
+void	gao_dump_queue_nested(struct gao_queue *queue);
+void	gao_dump_port(struct gao_port* port);
+void 	gao_dump_port_nested(struct gao_port* port);
+void	gao_dump_ports(struct gao_resources *resources);
+void 	gao_dump_ports_nested(struct gao_resources *resources);
 void	gao_dump_file(struct file *filep);
 
 const char*	gao_resource_state_string(gao_resource_state_t state);

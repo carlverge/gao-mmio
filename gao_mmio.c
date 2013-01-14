@@ -126,11 +126,11 @@ static void gao_ioctl_dump(struct file *filep, gao_request_dump_t type) {
 	case GAO_REQUEST_DUMP_DESCRIPTORS:
 		gao_dump_descriptors(&resources);
 		break;
-	case GAO_REQUEST_DUMP_QUEUES:
-		//gao_dump_queues(&resources);
+	case GAO_REQUEST_DUMP_PORTS:
+		gao_dump_ports(&resources);
 		break;
-	case GAO_REQUEST_DUMP_INTERFACES:
-		gao_dump_interfaces(&resources);
+	case GAO_REQUEST_DUMP_PORTS_NESTED:
+		gao_dump_ports_nested(&resources);
 		break;
 	case GAO_REQUEST_DUMP_FILE:
 		gao_dump_file(filep);
@@ -452,11 +452,81 @@ ssize_t gao_read(struct file *filep, char __user *descriptor_buf, size_t num_to_
 	return ret;
 }
 
+
+ssize_t gao_write(struct file *filep, const char __user *action_buf, size_t num_frames, loff_t *offset) {
+	ssize_t ret = 0;
+	uint64_t last_head, new_head, size;
+	struct gao_file_private *file_private = (struct gao_file_private*)filep->private_data;
+	struct gao_queue *queue = NULL;
+	struct gao_descriptor_ring	*dest_queue = NULL;
+	struct gao_descriptor (*descriptors)[] = NULL;
+	struct gao_action *action = NULL;
+
+	uint64_t	frames_to_forward, forward_index, frames_left, action_index;
+
+
+
+	rcu_read_lock();
+
+	if(unlikely(file_private->state != GAO_RESOURCE_STATE_ACTIVE))
+		gao_error_val(-EIO, "Cannot read from inactive queue");
+
+	queue = file_private->bound_queue;
+
+	if(unlikely(!queue))
+		gao_error_val(-EIO, "Reading null queue");
+
+	if(unlikely(queue->state != GAO_RESOURCE_STATE_ACTIVE))
+		gao_error_val(-EIO, "Cannot read from inactive queue");
+
+
+
+
+	forward_index = CIRC_NEXT(queue->ring->header.tail, queue->ring->header.capacity);
+	//Find the max number of frames outstanding to forward
+	if (num_frames > CIRC_DIFF64(queue->ring->header.head, forward_index, queue->ring->header.capacity)) {
+		frames_to_forward = CIRC_DIFF64(queue->ring->header.head, forward_index, queue->ring->header.capacity);
+	}else{
+		frames_to_forward = num_frames;
+	}
+
+	//Get the actions from userspace
+	copy_from_user(queue->action_map, action_buf, sizeof(struct gao_action)*frames_to_forward);
+
+	for(action_index = 0, frames_left = frames_to_forward; frames_left > 0; frames_left--, forward_index++, action_index++) {
+
+		log_dp("Forwarding %lu: index=%lu", (unsigned long)forward_index, (unsigned long)action_index);
+		action = &(*queue->action_map)[action_index];
+		gao_dump_action(action);
+
+		if(!action->action_id) {
+			log_dp("Drop: Action id is DROP");
+			continue;
+		}
+
+		dest_queue = queue->queue_map.port[action->port_id].ring[action->queue_id];
+		if(unlikely(!dest_queue)) {
+			log_dp("Drop: Null dest queue id");
+			continue;
+		}
+
+		log_dp("Would forward");
+
+	}
+
+	ret = file_private->port_ops->gao_write(file_private, (frames_to_forward - frames_left));
+
+
+	err:
+	rcu_read_unlock();
+	return ret;
+}
+
 static struct file_operations gao_fops = {
 	.owner	 = THIS_MODULE,
 	.mmap	 = gao_mmap,
 	.read	 = gao_read,
-//	.write	 = gao_write,
+	.write	 = gao_write,
 	.open	 = gao_open,
 	.release = gao_release,
 	.unlocked_ioctl = gao_ioctl,
@@ -497,7 +567,7 @@ static int __init gao_mmio_init(void) {
 
 	if(ret) log_error("Failed to initialize gaommio.");
 //
-    log_debug("GAOMMIO registered to %i name: %s.\n", gao_miscdev.minor, gao_miscdev.name);
+    log_debug("GAOMMIO registered to Major: 10 Minor: %i Name: /dev/%s.", gao_miscdev.minor, gao_miscdev.name);
 
     err:
     return ret;
