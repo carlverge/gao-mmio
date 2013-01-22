@@ -152,7 +152,7 @@ void	gao_e1000e_init_tx_ring(struct e1000_ring *hw_ring, struct gao_queue *gao_r
 void gao_e1000e_enable_rx_interrupts(struct gao_queue *queue) {
 	struct e1000_adapter *adapter = queue->hw_private;
 	struct e1000_hw *hw = &adapter->hw;
-	log_debug("Enabling RX interrupts");
+	log_dp("Enabling RX interrupts");
 	//Enable the RX Timer interrupt
 	ew32(IMS, (E1000_IMS_RXT0 | E1000_IMS_RXQ0 | E1000_IMS_OTHER | E1000_IMS_LSC));
 	e1e_flush();
@@ -163,7 +163,7 @@ void gao_e1000e_enable_tx_interrupts(struct gao_queue *queue) {
 	struct e1000_hw *hw = &adapter->hw;
 	//TODO: Set the TXD_LOW Interrupt, and set the Low thresh in the TXDCTL Reg
 	uint32_t flags = ( E1000_IMS_OTHER | E1000_IMS_LSC | E1000_IMS_TXDW | E1000_IMS_TXQ0 | E1000_IMS_TXQE | E1000_IMS_TXD_LOW);
-	log_debug("Enabling TX interrupts");
+	log_dp("Enabling TX interrupts");
 	ew32(IMS, flags);
 	e1e_flush();
 	log_debug("Ena TX IRQ IMS=%x IAM=%x", er32(IMS) ,er32(IAM));
@@ -173,7 +173,7 @@ void gao_e1000e_disable_rx_interrupts(struct gao_queue *queue) {
 	struct e1000_adapter *adapter = queue->hw_private;
 	struct e1000_hw *hw = &adapter->hw;
 
-	log_debug("Disabling RX Interrupts");
+	log_dp("Disabling RX Interrupts");
 	//Disable the interrupts
 	ew32(IMC, ( E1000_IMS_RXT0 | //RX Timer
 			E1000_IMS_RXO | //RX Overrun
@@ -189,7 +189,7 @@ void gao_e1000e_disable_tx_interrupts(struct gao_queue *queue) {
 	struct e1000_adapter *adapter = queue->hw_private;
 	struct e1000_hw *hw = &adapter->hw;
 
-	log_debug("Disabling TX Interrupts");
+	log_dp("Disabling TX Interrupts");
 	//Disable the interrupts
 	ew32(IMC, ( E1000_IMS_TXDW | //TX Desc Written Back
 			E1000_IMS_TXQE | //TX Queue Empty
@@ -206,7 +206,7 @@ void gao_e1000e_handle_rx_irq(struct net_device* netdev, struct e1000_adapter *a
 	struct gao_port* port = gao_get_port_from_ifindex(netdev->ifindex);
 	struct gao_queue* gao_queue = NULL;
 	uint32_t icr = er32(ICR);
-	log_debug("Handling RX ICR=%x", icr);
+	log_dp("Handling RX ICR=%x", icr);
 
 	if(unlikely(!port)) goto err;
 	gao_queue = port->rx_queues[0];
@@ -336,6 +336,9 @@ int64_t	gao_e1000e_deactivate_port(struct net_device *netdev) {
 	gao_unlock_resources(resources);
 	return 0;
 }
+
+
+
 
 ///**
 // * Transmit frames.
@@ -498,17 +501,7 @@ int64_t	gao_e1000e_deactivate_port(struct net_device *netdev) {
 //
 
 
-static void	gao_e1000e_dump_rx_ring(struct e1000_ring *ring) {
-	uint64_t index;
-	uint32_t	staterr;
-	union e1000_rx_desc_extended *hw_desc = NULL;
-	log_debug("Dump e1000e rx ring:");
-	for(index = 0; index < ring->count; index++) {
-		hw_desc = E1000_RX_DESC_EXT(*ring, index);
-		staterr = le32_to_cpu(hw_desc->wb.upper.status_error);
-		log_debug("Index %lu: staterr=%u", (unsigned long)index, staterr);
-	}
-}
+
 
 /**
  * @warning Caller must hold RCU read lock
@@ -525,7 +518,7 @@ ssize_t		gao_e1000e_read(struct gao_file_private *file_priv, size_t num_to_read)
 	struct e1000_adapter		*adapter = NULL;
 	struct e1000_ring			*hw_ring = NULL;
 	union e1000_rx_desc_extended *hw_desc = NULL;
-	uint64_t	index, head, tail, size, left_to_read = num_to_read, left_to_clean; //GAO and HW ring always aligned
+	uint64_t	index, size, left_to_read = num_to_read; //GAO and HW ring always aligned
 	uint32_t	staterr;
 
 	queue = file_priv->bound_queue;
@@ -594,7 +587,7 @@ ssize_t		gao_e1000e_read(struct gao_file_private *file_priv, size_t num_to_read)
 				staterr);
 
 		if(!(staterr & E1000_RXD_STAT_DD)) {
-			log_debug("DD not set, don't use this descriptor.");
+			log_dp("DD not set, don't use this descriptor.");
 			break;
 		}
 
@@ -634,15 +627,15 @@ ssize_t		gao_e1000e_read(struct gao_file_private *file_priv, size_t num_to_read)
  */
 ssize_t		gao_e1000e_write(struct gao_file_private *file_priv, size_t num_to_clean) {
 	//TODO: Clean up pointer infrastructure here
-	ssize_t						ret = 0;
+
 	struct gao_queue			*queue = NULL;
 	struct gao_descriptor_ring	*gao_ring = NULL;
 	struct gao_descriptor		(*gao_descriptors)[];
 	struct e1000_adapter		*adapter = NULL;
 	struct e1000_ring			*hw_ring = NULL;
 	union e1000_rx_desc_extended *hw_desc = NULL;
-	uint64_t	index, head, tail, size, left_to_clean = num_to_clean; //GAO and HW ring always aligned
-	uint32_t	staterr;
+	uint64_t	index, head, size, left_to_clean = num_to_clean; //GAO and HW ring always aligned
+
 
 
 

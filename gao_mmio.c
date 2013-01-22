@@ -7,6 +7,7 @@
 
 #include "gao_mmio.h"
 
+
 static struct gao_resources resources;
 
 inline struct gao_resources*	gao_get_resources(void) {
@@ -188,9 +189,14 @@ long gao_ioctl_handle_queue(struct file * filep, unsigned long request_ptr) {
 	return ret;
 }
 
+
+
+
+
 long gao_ioctl_handle_port(struct file * filep, unsigned long request_ptr) {
 	long ret = 0;
 	struct gao_request_port	*request = NULL;
+	struct gao_request_port_list *list = NULL;
 
 	request = kmalloc(sizeof(struct gao_request_port), GFP_KERNEL);
 	check_ptr(request);
@@ -217,6 +223,21 @@ long gao_ioctl_handle_port(struct file * filep, unsigned long request_ptr) {
 		copy_to_user((void*)request_ptr, request, sizeof(struct gao_request_port));
 
 		break;
+
+	case GAO_REQUEST_PORT_LIST:
+		if(!request->port_list) gao_error_val(-EINVAL, "Null port list buffer given for port list request.");
+
+		list = gao_get_port_list(gao_get_resources());
+		check_ptr(list);
+
+		request->response_code = GAO_RESPONSE_PORT_OK;
+		copy_to_user((void*)request->port_list, (void*)list, sizeof(struct gao_request_port_list));
+
+		gao_free_port_list(list);
+
+
+		break;
+
 	default:
 		ret = -EINVAL;
 		break;
@@ -401,7 +422,7 @@ ssize_t gao_read(struct file *filep, char __user *descriptor_buf, size_t num_to_
 	if(ret > 0) {
 
 		new_head = queue->ring->header.head;
-		log_debug("Got %ld descriptors, copying to userspace. last_head=%lu new_head=%lu",
+		log_dp("Got %ld descriptors, copying to userspace. last_head=%lu new_head=%lu",
 						ret, (unsigned long)last_head, (unsigned long)new_head);
 
 		//Copy the ring descriptors to the linear buffer in the right order
@@ -452,18 +473,33 @@ ssize_t gao_read(struct file *filep, char __user *descriptor_buf, size_t num_to_
 	return ret;
 }
 
+inline static void gao_lock_subqueue(struct gao_descriptor_ring *ring) {
+	log_dp("Spinlocking ring");
+	spin_lock(&ring->control.tail_lock);
+	log_dp("Locked ring");
+}
+
+inline static void gao_unlock_subqueue(struct gao_descriptor_ring *ring) {
+	log_dp("Unlocking ring");
+	spin_unlock(&ring->control.tail_lock);
+}
+
+
+
+//static log_
+//inline static int64_t gao_queue_descriptor()
 
 ssize_t gao_write(struct file *filep, const char __user *action_buf, size_t num_frames, loff_t *offset) {
 	ssize_t ret = 0;
-	uint64_t last_head, new_head, size;
 	struct gao_file_private *file_private = (struct gao_file_private*)filep->private_data;
 	struct gao_queue *queue = NULL;
 	struct gao_descriptor_ring	*dest_queue = NULL;
 	struct gao_descriptor (*descriptors)[] = NULL;
 	struct gao_action *action = NULL;
-
-	uint64_t	frames_to_forward, forward_index, frames_left, action_index;
-
+	uint64_t	previous_wake_condition;
+	uint64_t	frames_to_forward, hwqueue_index, hwqueue_capacity, action_index, frames_same_action = 0;
+	uint64_t	round_index = 0, round_max;
+	uint64_t	dest_tail, dest_head, dest_capacity, dest_remaining;
 
 
 	rcu_read_lock();
@@ -479,13 +515,13 @@ ssize_t gao_write(struct file *filep, const char __user *action_buf, size_t num_
 	if(unlikely(queue->state != GAO_RESOURCE_STATE_ACTIVE))
 		gao_error_val(-EIO, "Cannot read from inactive queue");
 
+	descriptors = &queue->ring->descriptors;
 
-
-
-	forward_index = CIRC_NEXT(queue->ring->header.tail, queue->ring->header.capacity);
 	//Find the max number of frames outstanding to forward
-	if (num_frames > CIRC_DIFF64(queue->ring->header.head, forward_index, queue->ring->header.capacity)) {
-		frames_to_forward = CIRC_DIFF64(queue->ring->header.head, forward_index, queue->ring->header.capacity);
+	hwqueue_index = CIRC_NEXT(queue->ring->header.tail, queue->ring->header.capacity);
+	hwqueue_capacity = queue->ring->header.capacity;
+	if (num_frames > CIRC_DIFF64(queue->ring->header.head, hwqueue_index, hwqueue_capacity )) {
+		frames_to_forward = CIRC_DIFF64(queue->ring->header.head, hwqueue_index, hwqueue_capacity);
 	}else{
 		frames_to_forward = num_frames;
 	}
@@ -493,28 +529,157 @@ ssize_t gao_write(struct file *filep, const char __user *action_buf, size_t num_
 	//Get the actions from userspace
 	copy_from_user(queue->action_map, action_buf, sizeof(struct gao_action)*frames_to_forward);
 
-	for(action_index = 0, frames_left = frames_to_forward; frames_left > 0; frames_left--, forward_index++, action_index++) {
+	log_dp("Starting write with %lu frames to forward.", (unsigned long)frames_to_forward);
 
-		log_dp("Forwarding %lu: index=%lu", (unsigned long)forward_index, (unsigned long)action_index);
+
+	//The in
+
+
+	//Main action apply loop
+	for(action_index = 0; action_index < frames_to_forward; action_index += frames_same_action) {
+
+		log_dp("Forwarding: index=%lu", (unsigned long)action_index);
 		action = &(*queue->action_map)[action_index];
 		gao_dump_action(action);
 
-		if(!action->action_id) {
+		//How many frames have the same action? Apply them in batch.
+		frames_same_action = 0;
+		while(action->action == (*queue->action_map)[action_index+frames_same_action].action) {
+			if((action_index+frames_same_action) > frames_to_forward) break;
+			frames_same_action++;
+		}
+
+		log_dp("Frames with same action this round: %lu", (unsigned long)frames_same_action);
+
+		if(unlikely(action->action & GAO_INVALID_ACTION_MASK)) {
+			log_dp("Drop: Invalid action=%#08x", action->action);
+			hwqueue_index = CIRC_ADD(hwqueue_index, frames_same_action, hwqueue_capacity);
+			continue;
+		}
+
+
+		switch(action->action_id) {
+
+		case GAO_ACTION_DROP:
+			//Forward the hwqueue index over the dropped frames
+			hwqueue_index = CIRC_ADD(hwqueue_index, frames_same_action, hwqueue_capacity);
 			log_dp("Drop: Action id is DROP");
-			continue;
+			break;
+
+		case GAO_ACTION_FORWARD:
+
+
+			dest_queue = queue->queue_map.port[action->port_id].ring[action->queue_id];
+
+			if(unlikely(!dest_queue)) {
+				log_dp("Drop: Null dest queue");
+				hwqueue_index = CIRC_ADD(hwqueue_index, frames_same_action, hwqueue_capacity);
+				break;
+			}
+
+			gao_lock_subqueue(dest_queue);
+
+			dest_head = dest_queue->header.head;
+			dest_tail = dest_queue->header.tail;
+			dest_capacity = dest_queue->header.capacity;
+			dest_remaining = CIRC_DIFF64(dest_tail, dest_head, dest_capacity);
+			round_max = (frames_same_action > dest_remaining) ? dest_remaining : frames_same_action;
+
+			log_dp("dest_remaining=%lu round_max=%lu", (unsigned long)dest_remaining, (unsigned long)round_max);
+
+			//Swap the descriptors
+			for(round_index = 0; round_index < round_max; round_index++) {
+				log_dp("Queuing desc [action %lu]: hwqueue_index=%lu dest_head=%lu hw_desc=%lx dest_desc=%lx",
+						(unsigned long)(action_index + round_index), (unsigned long)hwqueue_index,
+						(unsigned long)dest_head, (unsigned long)(*descriptors)[hwqueue_index].descriptor,
+						(unsigned long)dest_queue->descriptors[dest_head].descriptor);
+				swap_descriptors(&(*descriptors)[hwqueue_index], &dest_queue->descriptors[dest_head]);
+				dest_head = CIRC_NEXT(dest_head, dest_capacity);
+				hwqueue_index = CIRC_NEXT(hwqueue_index, hwqueue_capacity);
+			}
+
+			hwqueue_index = CIRC_ADD(hwqueue_index, (frames_same_action - round_max), hwqueue_capacity);
+			log_dp("Left/dropped: %lu", (unsigned long)(frames_same_action - round_max));
+			log_dp("Done action round, dest_head=%lu", (unsigned long)dest_head);
+
+			dest_queue->header.head = dest_head;
+
+
+			//Wake the endpoint
+			previous_wake_condition = test_and_set_bit(action->queue_id, (unsigned long*)dest_queue->control.tail_wake_condition_ref);
+			log_dp("Prev wake condition = %lx", (unsigned long)previous_wake_condition);
+			if(!(previous_wake_condition & ~(1 << action->queue_id))) {
+				log_debug("Need to wake queue.");
+				wake_up_interruptible(dest_queue->control.tail_wait_queue_ref);
+			}
+
+
+			gao_unlock_subqueue(dest_queue);
+			break;
+
+		default:
+			//Forward the hwqueue index over the dropped frames
+			hwqueue_index = CIRC_ADD(hwqueue_index, frames_same_action, hwqueue_capacity);
+			log_dp("Drop: Action id is Unsupported");
+			break;
+
 		}
 
-		dest_queue = queue->queue_map.port[action->port_id].ring[action->queue_id];
-		if(unlikely(!dest_queue)) {
-			log_dp("Drop: Null dest queue id");
-			continue;
-		}
-
-		log_dp("Would forward");
 
 	}
 
-	ret = file_private->port_ops->gao_write(file_private, (frames_to_forward - frames_left));
+
+	ret = file_private->port_ops->gao_write(file_private, frames_to_forward);
+
+//
+//	forward_index = CIRC_NEXT(queue->ring->header.tail, queue->ring->header.capacity);
+//	//Find the max number of frames outstanding to forward
+//	if (num_frames > CIRC_DIFF64(queue->ring->header.head, forward_index, queue->ring->header.capacity)) {
+//		frames_to_forward = CIRC_DIFF64(queue->ring->header.head, forward_index, queue->ring->header.capacity);
+//	}else{
+//		frames_to_forward = num_frames;
+//	}
+//
+//	//Get the actions from userspace
+//	copy_from_user(queue->action_map, action_buf, sizeof(struct gao_action)*frames_to_forward);
+//
+//	log_debug("Send this shit to p0/q0!");
+//
+//	dest_queue = queue->queue_map.port[0].ring[0];
+//	if(!dest_queue) {
+//		log_bug("nvm, destq was null, lol!");
+//		goto err;
+//	}
+//
+//	previous_wake_condition = test_and_set_bit(0, (unsigned long*)dest_queue->control.tail_wake_condition_ref);
+//	log_debug("Prev wake condition = %lx", (unsigned long)previous_wake_condition);
+//	//if(!(previous_wake_condition & ~1)) {
+//		log_debug("Need to wake queue.");
+//		wake_up_interruptible(dest_queue->control.tail_wait_queue_ref);
+//	//}
+//
+////	for(action_index = 0, frames_left = frames_to_forward; frames_left > 0; frames_left--, forward_index++, action_index++) {
+////
+////		log_dp("Forwarding %lu: index=%lu", (unsigned long)forward_index, (unsigned long)action_index);
+////		action = &(*queue->action_map)[action_index];
+////		gao_dump_action(action);
+////
+////		if(!action->action_id) {
+////			log_dp("Drop: Action id is DROP");
+////			continue;
+////		}
+////
+////		dest_queue = queue->queue_map.port[action->port_id].ring[action->queue_id];
+////		if(unlikely(!dest_queue)) {
+////			log_dp("Drop: Null dest queue id");
+////			continue;
+////		}
+////
+////		log_dp("Would forward");
+////
+////	}
+//
+//	ret = 1;//file_private->port_ops->gao_write(file_private, (frames_to_forward - frames_left));
 
 
 	err:

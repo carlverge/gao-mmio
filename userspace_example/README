@@ -1,0 +1,7 @@
+To get this example working, you'll need to make sure gao-mmio is in your included paths for your eclipse project. 
+Make a new C/C++ project with the files in the userspace_example directory, then follow the directions below.
+
+1. Right click on your project in the project explorer, then go properties.
+2. Go under C/C++ General > Paths and Symbols, under the Includes tab, with GNU C in the left columns
+3. Add the gao-mmio root folder to the included paths.
+

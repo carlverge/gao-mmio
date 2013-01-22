@@ -72,7 +72,9 @@
 
 //Circular buffer branchless calculations
 #define CIRC_NEXT(INDEX, MAX) ( ((INDEX)+1) % MAX )
+#define CIRC_ADD(INDEX, NUM, MAX) ( ((INDEX)+NUM) % MAX )
 #define CIRC_PREV(INDEX, MAX) (( MAX + ((INDEX)-1) ) % MAX)
+#define CIRC_SUB(INDEX, NUM, MAX) (( MAX + ((INDEX)-NUM) ) % MAX)
 #define CIRC_DIFF16(b,a,max) ((b-a) + (max*(((b-a) & 0x8000)>>15)))
 #define CIRC_DIFF32(b,a,max) ((b-a) + (max*(((b-a) & 0x80000000)>>31)))
 #define CIRC_DIFF64(b,a,max) ((b-a) + (max*(((b-a) & 0x8000000000000000)>>63)))

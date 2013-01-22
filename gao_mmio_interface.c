@@ -8,8 +8,14 @@
 #define LINUX
 #endif
 
+
+
 #include "gao_mmio_resource.h"
 
+#ifndef CONFIG_HZ
+//FIXME: Take this out, just to make eclipse happy. Shouldn't affect the actual compilation...
+#define CONFIG_HZ 1000
+#endif
 
 const static char *gao_resource_state_str[] = {"Unused", "Registered", "Active", "Configuring", "Deleting"};
 //const static char *gao_owner_str[] = {"None", "Userspace", "Interface"};
@@ -89,7 +95,8 @@ int64_t		gao_register_port(struct net_device *netdev, struct gao_port_ops* if_op
 	gao_lock_resources(resources);
 
 	//Walk the interface slots and find a free one
-	for(index = 0; index < GAO_MAX_PORTS; index++) {
+	//Start at index 1 for openflow
+	for(index = 1; index < GAO_MAX_PORTS; index++) {
 		if(resources->ports[index].state == GAO_RESOURCE_STATE_UNUSED) {
 			interface = &resources->ports[index];
 			memset(interface, 0, sizeof(struct gao_port));
@@ -118,6 +125,95 @@ int64_t		gao_register_port(struct net_device *netdev, struct gao_port_ops* if_op
 EXPORT_SYMBOL(gao_register_port);
 
 
+static void	gao_transmit_arbiter(struct work_struct *work) {
+	struct gao_tx_arbiter *tx_arbiter = (struct gao_tx_arbiter*) work;
+	struct gao_queue *queue = tx_arbiter->tx_queue;
+	struct gao_descriptor_ring *ring = queue->ring;
+	struct gao_descriptor_ring *subqueue = NULL;
+	uint64_t	subqueue_index, subqueue_bits;
+	uint64_t	subqueue_head, subqueue_tail, subqueue_capacity;
+	uint64_t	hwqueue_head, hwqueue_tail, hwqueue_capacity, frames_this_round;
+	log_debug("Starting scheduler for queue %lu", (unsigned long)queue->index);
+
+	hwqueue_head = ring->header.head;
+	hwqueue_tail = ring->header.tail;
+	hwqueue_capacity = ring->header.capacity;
+
+	for(;;) {
+		if(queue->state != GAO_RESOURCE_STATE_ACTIVE) goto deleting;
+
+
+
+		/*
+		 * Block on egress queues, schedule into HW queue
+		 */
+
+		wait_event_interruptible(ring->control.tail_wait_queue, (subqueue_bits = atomic_long_read(ring->control.tail_wake_condition_ref)));
+		if(queue->state != GAO_RESOURCE_STATE_ACTIVE) goto deleting;
+
+		if(unlikely(!subqueue_bits)) {
+			log_bug("Woke with zero subqueue bits");
+			continue;
+		}
+
+		frames_this_round = hwqueue_capacity - CIRC_DIFF64(hwqueue_tail, hwqueue_head, hwqueue_capacity);
+
+		log_debug("Woke arbiter, subqueue_bits=%lx, frames_this_round=%lu", (unsigned long)subqueue_bits, (unsigned long)frames_this_round);
+		for(subqueue_index = __builtin_ffsl(subqueue_bits) - 1; subqueue_bits; subqueue_index = __builtin_ffsl(subqueue_bits) - 1) {
+			log_dp("Would schedule subqueue_index=%lu", (unsigned long)subqueue_index);
+
+			subqueue = queue->subqueues[subqueue_index].ring;
+			if(unlikely(!subqueue)) {
+				log_bug("Null subqueue was flagged!");
+				continue;
+			}
+
+			//Empty the subqueue
+			rmb();
+			subqueue_head = subqueue->header.head;
+			subqueue_tail = subqueue->header.tail;
+			subqueue_capacity = subqueue->header.capacity;
+
+			log_dp("Start scheduling subqueue %lu, tail=%lu head=%lu", (unsigned long)subqueue_index, (unsigned long)subqueue_tail, (unsigned long)subqueue_head);
+			subqueue_tail = CIRC_NEXT(subqueue_tail, subqueue_capacity);
+			for(; (subqueue_tail != subqueue_head) && frames_this_round; frames_this_round-- ) {
+				log_dp("Schedule subqueue_tail=%lu hwqueue_tail=%lu subqueue_desc=%lx hwqueue_desc=%lx frames_this_round=%lu",
+						(unsigned long)subqueue_tail,  (unsigned long)hwqueue_tail,
+						(unsigned long)subqueue->descriptors[subqueue_tail].descriptor, (unsigned long)ring->descriptors[hwqueue_tail].descriptor,
+						(unsigned long)frames_this_round);
+				swap_descriptors(&subqueue->descriptors[subqueue_tail], &ring->descriptors[hwqueue_tail]);
+				subqueue_tail = CIRC_NEXT(subqueue_tail, subqueue_capacity);
+				hwqueue_tail = CIRC_NEXT(hwqueue_tail, hwqueue_capacity);
+			}
+			subqueue_tail = CIRC_PREV(subqueue_tail, subqueue_capacity);
+			log_dp("Done scheduling subqueue %lu, setting tail=%lu", (unsigned long)subqueue_index, (unsigned long)subqueue_tail);
+
+			subqueue->header.tail = subqueue_tail;
+			wmb();
+			subqueue_bits &= ~(1 << subqueue_index);
+		}
+
+		atomic_long_set(ring->control.tail_wake_condition_ref, subqueue_bits);
+
+		if(frames_this_round < 64) log_dp("Would block on xmit");
+
+		/*
+		 * Transmit to HW, block until we have enough space for another scheduling loop
+		 */
+
+//		log_debug("Starting scheduler loop for queue %lu", (unsigned long)queue->index);
+//		atomic_long_set(ring->control.head_wake_condition_ref, 0);
+//		wait_event_interruptible_timeout(ring->control.head_wait_queue, atomic_long_read(&ring->control.head_wake_condition), 2*HZ);
+
+
+	}
+
+
+	deleting:
+	log_debug("Stopping scheduler for queue %lu", (unsigned long)queue->index);
+	return;
+}
+
 /**
  * Allocate and configure generic parameters for an interface coming up.
  * @warning Caller must hold resource lock
@@ -126,12 +222,27 @@ EXPORT_SYMBOL(gao_register_port);
  */
 int64_t		gao_activate_port(struct gao_port* port) {
 	int64_t ret = 0;
+	uint64_t index;
 	struct gao_resources* resources = gao_get_resources();
 
 
 	ret = gao_create_port_queues(resources, port);
+	if(ret) goto err;
 
+	port->tx_arbiter_workqueue = alloc_workqueue((char*)&port->name, 0, port->num_tx_queues);
+	if(!port->tx_arbiter_workqueue)
+		gao_error_val(-ENOMEM, "Failed to create TX arbiter workqueue on port %s[%lu].", port->name, (unsigned long)port->gao_ifindex);
 
+	//Start the transmit arbiters
+	for(index = 0; index < port->num_tx_queues; index++) {
+		port->tx_arbiters[index].tx_queue = port->tx_queues[index];
+		INIT_WORK(&port->tx_arbiters[index].work, gao_transmit_arbiter);
+		queue_work(port->tx_arbiter_workqueue, &port->tx_arbiters[index].work);
+	}
+
+	return ret;
+	err:
+	gao_deactivate_port(port);
 	return ret;
 }
 EXPORT_SYMBOL(gao_activate_port);
@@ -168,14 +279,20 @@ int64_t		gao_enable_gao_port(struct gao_resources *resources, uint64_t ifindex) 
 	struct net_device		*netdev = NULL;
 	struct gao_port_ops		*if_ops = NULL;
 
+
 	rcu_read_lock();
 
 	if(ifindex < 0 || ifindex >= GAO_MAX_PORTS) gao_error_val(-EFAULT, "Ifindex out of range: %lu.", (unsigned long)ifindex);
 	port = &resources->ports[ifindex];
 
-	if(port->state != GAO_RESOURCE_STATE_REGISTERED) {
+
+	if(port->state == GAO_RESOURCE_STATE_ACTIVE) {
+		gao_error_val(0, "Cannot enable, interface %lu already enabled: (state: %s).",
+						(unsigned long)ifindex, gao_resource_state_string(port->state));
+
+	} else if(port->state != GAO_RESOURCE_STATE_REGISTERED) {
 		gao_error_val(-EFAULT, "Cannot enable, interface %lu not in registered state: (state: %s).",
-				(unsigned long)ifindex, gao_resource_state_string(port->state));
+						(unsigned long)ifindex, gao_resource_state_string(port->state));
 	}
 
 	netdev = port->netdev;
@@ -188,6 +305,7 @@ int64_t		gao_enable_gao_port(struct gao_resources *resources, uint64_t ifindex) 
 
 	return 0;
 	err:
+	rcu_read_unlock();
 	return ret;
 }
 
@@ -218,11 +336,43 @@ int64_t		gao_disable_gao_port(struct gao_resources *resources, uint64_t ifindex)
 
 	return 0;
 	err:
+	rcu_read_unlock();
 	return ret;
 }
 
 
+void gao_free_port_list(struct gao_request_port_list* list) {
+	if(list) vfree(list);
+}
 
+struct gao_request_port_list* gao_get_port_list(struct gao_resources* resources) {
+	uint64_t	index;
+	struct gao_request_port_list* list = NULL;
+	struct gao_port *port = NULL;
+
+	list = vmalloc(sizeof(struct gao_request_port_list));
+	check_ptr(list);
+
+	memset((void*)list, 0, sizeof(struct gao_request_port_list));
+
+	for(index = 0; index < GAO_MAX_PORTS; index++) {
+		port = &resources->ports[index];
+
+		list->port[index].state = port->state;
+		if(port->state == GAO_RESOURCE_STATE_UNUSED) continue;
+
+		list->port[index].gao_ifindex = port->gao_ifindex;
+		list->port[index].ifindex = port->ifindex;
+		memcpy(&list->port[index].name, &port->name, sizeof(port->name));
+		list->port[index].num_rx_queues = port->num_rx_queues;
+		list->port[index].num_tx_queues = port->num_tx_queues;
+	}
+
+	return list;
+	err:
+	gao_free_port_list(list);
+	return NULL;
+}
 
 
 

@@ -189,6 +189,13 @@ void	gao_dump_file(struct file *filep) {
 			file_private->bound_direction, file_private->bound_queue);
 }
 
+
+inline void swap_descriptors(struct gao_descriptor *desc1, struct gao_descriptor *desc2) {
+	uint64_t desc_tmp = desc1->descriptor;
+	desc1->descriptor = desc2->descriptor;
+	desc2->descriptor = desc_tmp;
+}
+
 /**
  * This "validates" the buffers by checking if we kernel panic when we
  * write into them. Writes a unique string into each buffer we can check
@@ -722,6 +729,8 @@ static int64_t	gao_create_egress_subqueue(struct gao_resources *resources, struc
 	subqueue->ring = gao_create_descriptor_ring(resources, num_descriptors);
 	check_ptr_val(-ENOMEM, subqueue->ring);
 
+	subqueue->ring->header.head = 0;
+	subqueue->ring->header.tail = (num_descriptors - 1);
 
 	log_debug("Successfully created subqueue.");
 	return 0;
@@ -898,6 +907,29 @@ void	gao_delete_port_queues(struct gao_resources *resources, struct gao_port *po
 	//**This removes the requirement to check queue state in forwarding code (that is under RCU lock)
 	synchronize_rcu();
 
+	if(port->tx_arbiter_workqueue) {
+	//FIXME: Clean this up, the queue deletion routines also set the deleting state
+	//But we need to kill the arbiters here...
+		log_debug("Port %s[%lu] arbiter cleanup begins", (char*)&port->name, (unsigned long)port->gao_ifindex);
+		for(index = 0; index < port->num_tx_queues; index++) {
+			queue = port->tx_queues[index];
+			if(!queue) continue;
+			queue->state = GAO_RESOURCE_STATE_DELETING;
+			log_debug("Waking tx arbiter %lu for deletion", (unsigned long)index);
+			atomic_long_set(queue->ring->control.head_wake_condition_ref, 1);
+			wake_up_interruptible(queue->ring->control.head_wait_queue_ref);
+			atomic_long_set(queue->ring->control.tail_wake_condition_ref, ~0);
+			wake_up_interruptible(queue->ring->control.tail_wait_queue_ref);
+		}
+
+		log_debug("Port %s[%lu] draining arbiter workqueue...", (char*)&port->name, (unsigned long)port->gao_ifindex);
+		//This will block until all the tx arbiters have terminated
+		drain_workqueue(port->tx_arbiter_workqueue);
+		log_debug("Port %s[%lu] destroying arbiter workqueue...", (char*)&port->name, (unsigned long)port->gao_ifindex);
+		destroy_workqueue(port->tx_arbiter_workqueue);
+		port->tx_arbiter_workqueue = NULL;
+	}
+
 
 	for(index = 0; index < port->num_rx_queues; index++) {
 		queue = port->rx_queues[index];
@@ -1041,6 +1073,9 @@ static int64_t gao_create_egress_subqueues(struct gao_resources *resources, stru
 	ret = gao_create_egress_subqueue(resources, &queue->subqueues[0], queue->binding.port->num_rx_desc);
 	if(ret) gao_error("Failed to create subqueue. (ret=%ld)", (long)ret);
 
+	queue->subqueues[0].ring->control.tail_wait_queue_ref = &queue->ring->control.tail_wait_queue;
+	queue->subqueues[0].ring->control.tail_wake_condition_ref = &queue->ring->control.tail_wake_condition;
+
 
 	return 0;
 	err:
@@ -1057,10 +1092,9 @@ static int64_t gao_create_egress_subqueues(struct gao_resources *resources, stru
  */
 int64_t gao_create_port_queues(struct gao_resources* resources, struct gao_port *port) {
 	int64_t ret = 0;
-
 	uint64_t index;
 	//uint64_t groups_required, queues_required, groups_rx_per_queue, groups_tx_per_queue;
-	int64_t queue_index;
+
 	struct gao_queue* queue = NULL;
 
 	//Sanity check the interface queue values, confirm enough resources
@@ -1073,7 +1107,7 @@ int64_t gao_create_port_queues(struct gao_resources* resources, struct gao_port 
 	//Loop and allocate rx queues, assign pointers
 	for(index = 0; index < port->num_rx_queues; index++) {
 		queue = gao_create_queue(resources, port->num_rx_desc);
-		if(!queue) gao_error_val(queue_index, "Failed to alloc rx if queue idx %ld", (long)index);
+		if(!queue) gao_error_val(-ENOMEM, "Failed to alloc rx if queue idx %ld", (long)index);
 
 		queue->binding.owner_type = GAO_QUEUE_OWNER_PORT;
 		queue->binding.direction_txrx = GAO_DIRECTION_RX;
@@ -1087,7 +1121,7 @@ int64_t gao_create_port_queues(struct gao_resources* resources, struct gao_port 
 
 	for(index = 0; index < port->num_tx_queues; index++) {
 		queue = gao_create_queue(resources, port->num_tx_desc);
-		if(!queue) gao_error_val(queue_index, "Failed to alloc tx if queue idx %ld", (long)index);
+		if(!queue) gao_error_val(-ENOMEM, "Failed to alloc tx if queue idx %ld", (long)index);
 
 		queue->binding.owner_type = GAO_QUEUE_OWNER_PORT;
 		queue->binding.direction_txrx = GAO_DIRECTION_TX;

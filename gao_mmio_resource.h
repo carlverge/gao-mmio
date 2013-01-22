@@ -19,7 +19,8 @@
 #include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/types.h>
-
+#include <linux/workqueue.h>
+#include <linux/circ_buf.h>
 //#include <asm-generic/page.h>
 #include <linux/if.h>
 #include <linux/netdevice.h>
@@ -28,6 +29,7 @@
 #include <linux/rcupdate.h>
 #else
 #include <stdint.h>
+#include <net/if.h>
 #endif
 #include "log.h"
 #include "gao_mmio_constants.h"
@@ -116,15 +118,12 @@ struct	gao_descriptor {
 	};
 };
 
+
 struct gao_descriptor_ring_header {
-//	uint64_t				index; //XXX: Still need this?
-//	gao_resource_state_t 	state; //XXX: Still need this?
-	//XXX: Do we need/want a backpointer?
 	uint64_t				head;
 	uint64_t				tail;
 	uint64_t				capacity; //Total space in the queue, regardless of occupancy
 	uint64_t				size; //Total number of occupants
-
 };
 
 #define GAO_VIRT_TO_GFN(VIRTADDR) 	((unsigned long)((virt_to_phys(VIRTADDR)) >> GAO_GFN_SHIFT))
@@ -157,11 +156,19 @@ typedef enum gao_action_id {
 	GAO_ACTION_FORWARD,
 } gao_action_id;
 
+#define GAO_INVALID_ACTION_MASK	(~(0x00077F01))
+
 struct 			gao_action {
-	uint8_t		action_id;
-	uint8_t		port_id;
-	uint8_t		queue_id;
-	uint8_t		padding;
+	union {
+		struct {
+			uint8_t		action_id;
+			uint8_t		port_id;
+			uint8_t		queue_id;
+			uint8_t		padding;
+		};
+		uint32_t	action;
+	};
+
 };
 
 
@@ -330,6 +337,11 @@ typedef enum gao_port_qos_mode {
 	GAO_PORT_QOS_MODE_HW,
 } gao_port_qos_mode ;
 
+struct gao_tx_arbiter {
+	struct work_struct	work;
+	struct gao_queue	*tx_queue;
+};
+
 struct gao_port {
 	//TODO: Persistence: map an constant identifier like the HW address to the gao_ifindex
 	uint64_t				gao_ifindex; //gao internal gao_ifindex
@@ -347,6 +359,10 @@ struct gao_port {
 	uint32_t				num_tx_queues; //Set by ethernet driver
 	uint32_t				num_tx_desc; //Set by ethernet driver
 	struct gao_queue		*tx_queues[GAO_MAX_PORT_HWQUEUE];
+
+	//Scheduling arbiters attached to HW queues that serialize SW queues to the NIC ring
+	struct workqueue_struct	*tx_arbiter_workqueue;
+	struct gao_tx_arbiter	tx_arbiters[GAO_MAX_PORT_HWQUEUE];
 };
 
 
@@ -446,6 +462,8 @@ struct gao_request_queue {
 typedef enum gao_request_port_num_t {
 	GAO_REQUEST_PORT_ENABLE = 0,
 	GAO_REQUEST_PORT_DISABLE,
+	GAO_REQUEST_PORT_LIST,
+	GAO_REQUEST_PORT_GET_INFO,
 } gao_request_port_num_t;
 
 typedef enum gao_response_port_num_t {
@@ -453,10 +471,25 @@ typedef enum gao_response_port_num_t {
 	GAO_RESPONSE_PORT_NOK,
 } gao_response_port_num_t;
 
+
+
+
+struct gao_request_port_list {
+	struct {
+		uint64_t				gao_ifindex; //gao internal gao_ifindex
+		uint64_t				ifindex; //Kernel ifindex
+		char					name[IFNAMSIZ];
+		gao_resource_state_t 	state;
+		uint32_t				num_rx_queues;
+		uint32_t				num_tx_queues;
+	}port [GAO_MAX_PORTS];
+};
+
 struct gao_request_port {
-	gao_request_port_num_t 	request_code;
-	gao_response_port_num_t response_code;
-	uint64_t				gao_ifindex;
+	gao_request_port_num_t 			request_code;
+	gao_response_port_num_t 		response_code;
+	uint64_t						gao_ifindex;
+	struct gao_request_port_list	*port_list;
 };
 
 
@@ -492,6 +525,9 @@ void	gao_dump_ports(struct gao_resources *resources);
 void 	gao_dump_ports_nested(struct gao_resources *resources);
 void	gao_dump_file(struct file *filep);
 
+void 		gao_free_port_list(struct gao_request_port_list* list);
+struct gao_request_port_list* gao_get_port_list(struct gao_resources* resources);
+
 const char*	gao_resource_state_string(gao_resource_state_t state);
 
 void		gao_free_resources(struct gao_resources* resources);
@@ -519,14 +555,10 @@ void		gao_deactivate_port(struct gao_port* port);
 
 
 
-
-
-
-
-
-
-
 /* End of kernel-only functions */
 #endif
+
+
+inline void swap_descriptors(struct gao_descriptor *desc1, struct gao_descriptor *desc2);
 
 #endif /* GAO_MMIO_RESOURCE_H_ */
