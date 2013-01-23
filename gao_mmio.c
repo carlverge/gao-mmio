@@ -150,7 +150,8 @@ long gao_ioctl_handle_queue(struct file * filep, unsigned long request_ptr) {
 	request = kmalloc(sizeof(struct gao_request_queue), GFP_KERNEL);
 	check_ptr(request);
 
-	copy_from_user(request, (void*) request_ptr, sizeof(struct gao_request_queue));
+	ret = copy_from_user(request, (void*) request_ptr, sizeof(struct gao_request_queue));
+	if(ret) gao_error("Copy from user failed.");
 
 	switch(request->request_code) {
 
@@ -201,7 +202,9 @@ long gao_ioctl_handle_port(struct file * filep, unsigned long request_ptr) {
 	request = kmalloc(sizeof(struct gao_request_port), GFP_KERNEL);
 	check_ptr(request);
 
-	copy_from_user(request, (void*) request_ptr, sizeof(struct gao_request_port));
+	ret = copy_from_user(request, (void*) request_ptr, sizeof(struct gao_request_port));
+	if(ret) gao_error("Copy from user failed.");
+
 
 	switch(request->request_code) {
 
@@ -211,7 +214,8 @@ long gao_ioctl_handle_port(struct file * filep, unsigned long request_ptr) {
 		if(ret) request->response_code = GAO_RESPONSE_PORT_NOK;
 		else request->response_code = GAO_RESPONSE_PORT_OK;
 
-		copy_to_user((void*)request_ptr, request, sizeof(struct gao_request_port));
+		ret = copy_to_user((void*)request_ptr, request, sizeof(struct gao_request_port));
+		if(ret) gao_error("Copy to user failed.");
 
 		break;
 	case GAO_REQUEST_PORT_DISABLE:
@@ -220,7 +224,8 @@ long gao_ioctl_handle_port(struct file * filep, unsigned long request_ptr) {
 		if(ret) request->response_code = GAO_RESPONSE_PORT_NOK;
 		else request->response_code = GAO_RESPONSE_PORT_OK;
 
-		copy_to_user((void*)request_ptr, request, sizeof(struct gao_request_port));
+		ret = copy_to_user((void*)request_ptr, request, sizeof(struct gao_request_port));
+		if(ret) gao_error("Copy to user failed.");
 
 		break;
 
@@ -231,10 +236,9 @@ long gao_ioctl_handle_port(struct file * filep, unsigned long request_ptr) {
 		check_ptr(list);
 
 		request->response_code = GAO_RESPONSE_PORT_OK;
-		copy_to_user((void*)request->port_list, (void*)list, sizeof(struct gao_request_port_list));
-
+		ret = copy_to_user((void*)request->port_list, (void*)list, sizeof(struct gao_request_port_list));
 		gao_free_port_list(list);
-
+		if(ret) gao_error("Copy to user failed.");
 
 		break;
 
@@ -260,7 +264,8 @@ static int64_t	gao_ioctl_handle_mmap(struct file *filep, unsigned long request_p
 	request->size = resources.buffer_space_frame;
 	request->offset = resources.buffer_start_phys;
 	log_debug("IOCTL: Get MMAP request returns size=%lx offset=%lx", request->size, request->offset);
-	copy_to_user((void*)request_ptr, request, sizeof(struct gao_request_mmap));
+	ret = copy_to_user((void*)request_ptr, request, sizeof(struct gao_request_mmap));
+	if(ret) gao_error("Copy to user failed.");
 
 	err:
 	return ret;
@@ -342,7 +347,8 @@ long gao_ioctl (struct file * filep, unsigned int command, unsigned long argumen
 //
 	case GAO_IOCTL_COMMAND_DUMP:
 		if(!argument_ptr) gao_error_val(-EFAULT, "IOCTL: Null argument pointer.");
-		copy_from_user(&request_dump, (void*) argument_ptr, sizeof(request_dump));
+		ret = copy_from_user(&request_dump, (void*) argument_ptr, sizeof(request_dump));
+		if(ret) gao_error("Copy from user failed.");
 
 		gao_ioctl_dump(filep, request_dump);
 
@@ -427,10 +433,10 @@ ssize_t gao_read(struct file *filep, char __user *descriptor_buf, size_t num_to_
 
 		//Copy the ring descriptors to the linear buffer in the right order
 		if( new_head >= last_head) {
-			copy_to_user( descriptor_buf, &(*descriptors)[last_head], (new_head - last_head)*sizeof(struct gao_descriptor) );
+			ret = copy_to_user( descriptor_buf, &(*descriptors)[last_head], (new_head - last_head)*sizeof(struct gao_descriptor) );
 		}else{
-			copy_to_user( descriptor_buf, &(*descriptors)[last_head], (size - last_head)*sizeof(struct gao_descriptor));
-			copy_to_user( descriptor_buf + ((size - last_head)*sizeof(struct gao_descriptor)) , &(*descriptors)[0], new_head*sizeof(struct gao_descriptor));
+			ret = copy_to_user( descriptor_buf, &(*descriptors)[last_head], (size - last_head)*sizeof(struct gao_descriptor));
+			ret = copy_to_user( descriptor_buf + ((size - last_head)*sizeof(struct gao_descriptor)) , &(*descriptors)[0], new_head*sizeof(struct gao_descriptor));
 		}
 
 	}else{ //Didn't read anything, block
@@ -527,7 +533,8 @@ ssize_t gao_write(struct file *filep, const char __user *action_buf, size_t num_
 	}
 
 	//Get the actions from userspace
-	copy_from_user(queue->action_map, action_buf, sizeof(struct gao_action)*frames_to_forward);
+	ret = copy_from_user(queue->action_map, action_buf, sizeof(struct gao_action)*frames_to_forward);
+	if(ret) gao_error("Copy from user failed.");
 
 	log_dp("Starting write with %lu frames to forward.", (unsigned long)frames_to_forward);
 
