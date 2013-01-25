@@ -397,7 +397,7 @@ ssize_t gao_read(struct file *filep, char __user *descriptor_buf, size_t num_to_
 	uint64_t last_head, new_head, size;
 	struct gao_file_private *file_private = (struct gao_file_private*)filep->private_data;
 	struct gao_queue *queue = NULL;
-	struct gao_descriptor (*descriptors)[] = NULL;
+	struct gao_descriptor *descriptors = NULL;
 
 	read_again:
 
@@ -416,10 +416,10 @@ ssize_t gao_read(struct file *filep, char __user *descriptor_buf, size_t num_to_
 
 	last_head = queue->ring->header.head;
 	size = queue->ring->header.capacity;
-	descriptors = &queue->ring->descriptors;
+	descriptors = (struct gao_descriptor*)&queue->ring->descriptors;
 
 
-	ret = file_private->port_ops->gao_read(file_private, num_to_read);
+	ret = file_private->port_ops->gao_recv(queue, num_to_read);
 
 
 	//Got something
@@ -433,10 +433,10 @@ ssize_t gao_read(struct file *filep, char __user *descriptor_buf, size_t num_to_
 
 		//Copy the ring descriptors to the linear buffer in the right order
 		if( new_head >= last_head) {
-			ret = copy_to_user( descriptor_buf, &(*descriptors)[last_head], (new_head - last_head)*sizeof(struct gao_descriptor) );
+			copy_to_user( descriptor_buf, &descriptors[last_head], (new_head - last_head)*sizeof(struct gao_descriptor) );
 		}else{
-			ret = copy_to_user( descriptor_buf, &(*descriptors)[last_head], (size - last_head)*sizeof(struct gao_descriptor));
-			ret = copy_to_user( descriptor_buf + ((size - last_head)*sizeof(struct gao_descriptor)) , &(*descriptors)[0], new_head*sizeof(struct gao_descriptor));
+			copy_to_user( descriptor_buf, &descriptors[last_head], (size - last_head)*sizeof(struct gao_descriptor));
+			copy_to_user( descriptor_buf + ((size - last_head)*sizeof(struct gao_descriptor)) , &descriptors[0], new_head*sizeof(struct gao_descriptor));
 		}
 
 	}else{ //Didn't read anything, block
@@ -495,7 +495,7 @@ inline static void gao_unlock_subqueue(struct gao_descriptor_ring *ring) {
 //static log_
 //inline static int64_t gao_queue_descriptor()
 
-ssize_t gao_write(struct file *filep, const char __user *action_buf, size_t num_frames, loff_t *offset) {
+ssize_t gao_write_old(struct file *filep, const char __user *action_buf, size_t num_frames, loff_t *offset) {
 	ssize_t ret = 0;
 	struct gao_file_private *file_private = (struct gao_file_private*)filep->private_data;
 	struct gao_queue *queue = NULL;
@@ -546,12 +546,12 @@ ssize_t gao_write(struct file *filep, const char __user *action_buf, size_t num_
 	for(action_index = 0; action_index < frames_to_forward; action_index += frames_same_action) {
 
 		log_dp("Forwarding: index=%lu", (unsigned long)action_index);
-		action = &(*queue->action_map)[action_index];
+		action = &queue->action_map[action_index];
 		gao_dump_action(action);
 
 		//How many frames have the same action? Apply them in batch.
 		frames_same_action = 0;
-		while(action->action == (*queue->action_map)[action_index+frames_same_action].action) {
+		while(action->action == queue->action_map[action_index+frames_same_action].action) {
 			if((action_index+frames_same_action) > frames_to_forward) break;
 			frames_same_action++;
 		}
@@ -693,6 +693,114 @@ ssize_t gao_write(struct file *filep, const char __user *action_buf, size_t num_
 	rcu_read_unlock();
 	return ret;
 }
+
+
+
+ssize_t gao_write(struct file *filep, const char __user *action_buf, size_t num_frames, loff_t *offset) {
+	ssize_t 				ret = 0;
+	struct gao_file_private *file_private = (struct gao_file_private*)filep->private_data;
+	struct gao_queue 		*queue = NULL;
+	struct gao_descriptor_ring	*dest_queue = NULL;
+	struct gao_descriptor 	*descriptors = NULL;
+	struct gao_action 		*action = NULL;
+	uint64_t				action_index, index, size, num_to_forward,previous_wake_condition;
+
+	rcu_read_lock();
+
+	if(unlikely(file_private->state != GAO_RESOURCE_STATE_ACTIVE))
+		gao_error_val(-EIO, "Cannot read from inactive queue");
+
+	queue = file_private->bound_queue;
+
+	if(unlikely(!queue))
+		gao_error_val(-EIO, "Reading null queue");
+
+	if(unlikely(queue->state != GAO_RESOURCE_STATE_ACTIVE))
+		gao_error_val(-EIO, "Cannot read from inactive queue");
+
+	//Find the max number of frames outstanding to forward
+	num_to_forward = gao_ring_slots_left(queue->ring);
+	log_dp("fwd check: can fwd %llu", num_to_forward);
+	num_to_forward = (num_frames > num_to_forward) ? num_to_forward : num_frames;
+
+	//Get the actions from userspace
+	ret = copy_from_user(queue->action_map, action_buf, sizeof(struct gao_action)*num_to_forward);
+	if(ret) gao_error("Copy from user failed.");
+
+	//Initialize ring variables
+	size = queue->ring->header.capacity;
+	index = CIRC_NEXT(queue->ring->header.tail, size);
+	descriptors = (struct gao_descriptor*)&queue->ring->descriptors;
+
+	log_dp("start fwd: index/next_to_clean=%llu left=%llu", index, num_to_forward);
+
+
+	//Main action apply loop
+	for(action_index = 0; action_index < num_to_forward; action_index++, index = CIRC_NEXT(index, size)) {
+
+		action = &queue->action_map[action_index];
+
+		if(unlikely(action->action & GAO_INVALID_ACTION_MASK)) {
+			log_bug("fwd drop: invalid action=%#08x", action->action);
+			continue;
+		}
+
+
+		switch(action->action_id) {
+
+		case GAO_ACTION_DROP:
+			log_dp("fwd drop: action_id is drop");
+			continue;
+
+		case GAO_ACTION_FORWARD:
+			dest_queue = queue->queue_map.port[action->port_id].ring[action->queue_id];
+
+			if(unlikely(!dest_queue)) {
+				log_dp("fwd drop: null dest queue");
+				continue;
+			}
+
+			gao_lock_subqueue(dest_queue);
+
+
+			if(!gao_ring_slots_left(dest_queue)) {
+				log_dp("fwd drop: no slots left");
+				gao_unlock_subqueue(dest_queue);
+				continue;
+			}
+
+
+			swap_descriptors(&descriptors[index], &dest_queue->descriptors[dest_queue->header.tail]);
+			dest_queue->header.tail = CIRC_NEXT(dest_queue->header.tail, dest_queue->header.capacity);
+
+			//Wake the endpoint
+			previous_wake_condition = test_and_set_bit(action->queue_id, (unsigned long*)dest_queue->control.tail_wake_condition_ref);
+
+			log_dp("fwd: action_index=%llu port=%hhu queue=%hhu index=%llu new dest_tail=%llu prev_wake_cond=%llx",
+					action_index, action->port_id, action->queue_id, index, dest_queue->header.tail, previous_wake_condition);
+
+			if(!(previous_wake_condition & ~(1 << action->queue_id))) {
+				wake_up_interruptible(dest_queue->control.tail_wait_queue_ref);
+			}
+
+
+			gao_unlock_subqueue(dest_queue);
+			break;
+
+		default:
+			break;
+
+		}
+	}
+
+
+	ret = file_private->port_ops->gao_clean(queue, num_to_forward);
+
+	err:
+	rcu_read_unlock();
+	return ret;
+}
+
 
 static struct file_operations gao_fops = {
 	.owner	 = THIS_MODULE,

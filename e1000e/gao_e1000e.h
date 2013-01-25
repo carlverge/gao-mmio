@@ -152,7 +152,7 @@ void	gao_e1000e_init_tx_ring(struct e1000_ring *hw_ring, struct gao_queue *gao_r
 void gao_e1000e_enable_rx_interrupts(struct gao_queue *queue) {
 	struct e1000_adapter *adapter = queue->hw_private;
 	struct e1000_hw *hw = &adapter->hw;
-	log_dp("Enabling RX interrupts");
+	//log_dp("Enabling RX interrupts");
 	//Enable the RX Timer interrupt
 	ew32(IMS, (E1000_IMS_RXT0 | E1000_IMS_RXQ0 | E1000_IMS_OTHER | E1000_IMS_LSC));
 	e1e_flush();
@@ -163,17 +163,17 @@ void gao_e1000e_enable_tx_interrupts(struct gao_queue *queue) {
 	struct e1000_hw *hw = &adapter->hw;
 	//TODO: Set the TXD_LOW Interrupt, and set the Low thresh in the TXDCTL Reg
 	uint32_t flags = ( E1000_IMS_OTHER | E1000_IMS_LSC | E1000_IMS_TXDW | E1000_IMS_TXQ0 | E1000_IMS_TXQE | E1000_IMS_TXD_LOW);
-	log_dp("Enabling TX interrupts");
+	//log_dp("Enabling TX interrupts");
 	ew32(IMS, flags);
 	e1e_flush();
-	log_debug("Ena TX IRQ IMS=%x IAM=%x", er32(IMS) ,er32(IAM));
+	//log_debug("Ena TX IRQ IMS=%x IAM=%x", er32(IMS) ,er32(IAM));
 }
 
 void gao_e1000e_disable_rx_interrupts(struct gao_queue *queue) {
 	struct e1000_adapter *adapter = queue->hw_private;
 	struct e1000_hw *hw = &adapter->hw;
 
-	log_dp("Disabling RX Interrupts");
+	//log_dp("Disabling RX Interrupts");
 	//Disable the interrupts
 	ew32(IMC, ( E1000_IMS_RXT0 | //RX Timer
 			E1000_IMS_RXO | //RX Overrun
@@ -189,7 +189,7 @@ void gao_e1000e_disable_tx_interrupts(struct gao_queue *queue) {
 	struct e1000_adapter *adapter = queue->hw_private;
 	struct e1000_hw *hw = &adapter->hw;
 
-	log_dp("Disabling TX Interrupts");
+	//log_dp("Disabling TX Interrupts");
 	//Disable the interrupts
 	ew32(IMC, ( E1000_IMS_TXDW | //TX Desc Written Back
 			E1000_IMS_TXQE | //TX Queue Empty
@@ -206,7 +206,7 @@ void gao_e1000e_handle_rx_irq(struct net_device* netdev, struct e1000_adapter *a
 	struct gao_port* port = gao_get_port_from_ifindex(netdev->ifindex);
 	struct gao_queue* gao_queue = NULL;
 	uint32_t icr = er32(ICR);
-	log_dp("Handling RX ICR=%x", icr);
+	//log_dp("Handling RX ICR=%x", icr);
 
 	if(unlikely(!port)) goto err;
 	gao_queue = port->rx_queues[0];
@@ -626,6 +626,7 @@ ssize_t		gao_e1000e_read(struct gao_file_private *file_priv, size_t num_to_read)
  * @return
  */
 ssize_t		gao_e1000e_write(struct gao_file_private *file_priv, size_t num_to_clean) {
+
 	//TODO: Clean up pointer infrastructure here
 
 	struct gao_queue			*queue = NULL;
@@ -904,6 +905,133 @@ ssize_t		gao_e1000e_write(struct gao_file_private *file_priv, size_t num_to_clea
 //}
 
 
+/**
+ * Receive new frames into the GAO queue.
+ * @param gao_queue
+ * @return The number of frames received.
+ */
+uint64_t	gao_e1000e_clean(struct gao_queue *gao_queue, size_t num_to_clean) {
+	struct gao_descriptor	*gao_descriptors = (struct gao_descriptor*)&gao_queue->ring->descriptors;
+	struct e1000_adapter 	*adapter = (struct e1000_adapter*)gao_queue->hw_private;
+	struct e1000_ring 		*hw_ring = adapter->rx_ring;
+	union e1000_rx_desc_extended *hw_desc = NULL;
+	uint64_t				index = hw_ring->next_to_use, size = hw_ring->count, num_cleaned, head;
+
+
+	//Clean
+	head = gao_queue->ring->header.head;
+	//The next one is the next to clean
+	index = hw_ring->next_to_clean;
+
+	log_dp("start clean: index/next_to_clean=%llu left=%lu", index, num_to_clean);
+
+	while( (index != head) && num_to_clean ) {
+		hw_desc = E1000_RX_DESC_EXT(*hw_ring, index);
+		hw_desc->read.buffer_addr = cpu_to_le64(descriptor_to_phys_addr(gao_descriptors[index].descriptor));
+
+		log_dp("clean: index=%llu addr=%llx", index, hw_desc->read.buffer_addr);
+
+		index = CIRC_NEXT(index, size);
+		num_to_clean--;
+	}
+
+	num_cleaned = CIRC_DIFF16(index, hw_ring->next_to_clean, size);
+	hw_ring->next_to_clean = index;
+	gao_queue->ring->header.tail = CIRC_PREV(index, size);
+
+	wmb();
+	writel(gao_queue->ring->header.tail, hw_ring->tail);
+
+	log_dp("done clean: index/next_to_clean=%llu left=%lu cleaned=%llu", index, num_to_clean, num_cleaned);
+
+	return num_cleaned;
+}
+
+
+/**
+ * Receive new frames into the GAO queue.
+ * @param gao_queue
+ * @return The number of frames received.
+ */
+uint64_t	gao_e1000e_recv(struct gao_queue *gao_queue, size_t num_to_read) {
+	struct gao_descriptor	*gao_descriptors = (struct gao_descriptor*)&gao_queue->ring->descriptors;
+	struct e1000_adapter 	*adapter = (struct e1000_adapter*)gao_queue->hw_private;
+	struct e1000_ring 		*hw_ring = adapter->rx_ring;
+	union e1000_rx_desc_extended *hw_desc = NULL;
+	uint64_t				index = hw_ring->next_to_use, size = hw_ring->count, num_read;
+	uint32_t				staterr;
+
+	hw_desc = E1000_RX_DESC_EXT(*hw_ring, index);
+	staterr = le32_to_cpu(hw_desc->wb.upper.status_error);
+
+	log_dp("start recv: index/head=%llu left=%lu staterr=%x", index, num_to_read, staterr);
+
+	while( (staterr & E1000_RXD_STAT_DD) && num_to_read) {
+		gao_descriptors[index].len = le16_to_cpu(hw_desc->wb.upper.length);
+		hw_desc->wb.upper.status_error &= cpu_to_le32(~0xFF);
+
+		log_dp("recv: index=%llu len=%hu left=%lu", index, gao_descriptors[index].len, num_to_read);
+
+		index = CIRC_NEXT(index, size);
+		num_to_read--;
+		hw_desc = E1000_RX_DESC_EXT(*hw_ring, index);
+		staterr = le32_to_cpu(hw_desc->wb.upper.status_error);
+	}
+
+	num_read = CIRC_DIFF64(index, gao_queue->ring->header.head, size);
+	hw_ring->next_to_use = index;
+	gao_queue->ring->header.head = index;
+
+	log_dp("done recv: index/head=%llu left=%lu read=%llu", index, num_to_read, num_read);
+
+	return num_read;
+}
+
+
+
+/**
+ * Transmit the frames on the GAO queue.
+ * @warning Assumes the tail is not mangled.
+ * @warning Caller must hold RCU read lock
+ * @param gao_queue
+ * @return The number of descriptors available on the nic tx queue.
+ */
+ssize_t	gao_e1000e_xmit(struct gao_queue *gao_queue) {
+	struct gao_descriptor	*gao_descriptors = (struct gao_descriptor*)&gao_queue->ring->descriptors;
+	struct e1000_adapter 	*adapter = (struct e1000_adapter*)gao_queue->hw_private;
+	struct e1000_ring 		*hw_ring = adapter->tx_ring;
+	struct e1000_tx_desc 	*hw_desc = NULL;
+	uint64_t				index = hw_ring->next_to_use, size = hw_ring->count, limit;
+
+	//We will advance the nic tail to the gao tail
+	limit = gao_queue->ring->header.tail;
+
+	log_dp("start xmit: index/tail=%llu limit=%llu", index, limit);
+
+	for(; index != limit; index = CIRC_NEXT(index, size) ) {
+		hw_desc = E1000_TX_DESC(*hw_ring, index);
+		log_dp("xmit: index=%llu desc=%016llx", index, gao_descriptors[index].descriptor);
+		hw_desc->buffer_addr = cpu_to_le64(descriptor_to_phys_addr(gao_descriptors[index].descriptor));
+		hw_desc->lower.data  = cpu_to_le32(gao_descriptors[index].len | GAO_E1000E_TXD_FLAGS);
+		hw_desc->upper.data  = 0;
+	}
+
+	//Update the tails on the NIC ring
+	wmb();
+	hw_ring->next_to_use = index;
+	writel(index, hw_ring->tail);
+
+	//Make sure the IO writes from the NIC have completed before we read the new head
+	mmiowb();
+	index = readl(hw_ring->head);
+	hw_ring->next_to_clean = index;
+	gao_queue->ring->header.head = index;
+
+	log_dp("done xmit: index/head=%llu free=%llu", index, gao_ring_slots_left(gao_queue->ring));
+
+	return (ssize_t)gao_ring_slots_left(gao_queue->ring);
+
+}
 
 
 struct gao_port_ops gao_e1000e_port_ops = {
@@ -911,6 +1039,9 @@ struct gao_port_ops gao_e1000e_port_ops = {
 		.gao_disable = gao_e1000e_disable_gao_mode,
 		.gao_read = gao_e1000e_read,
 		.gao_write = gao_e1000e_write,
+		.gao_clean = gao_e1000e_clean,
+		.gao_recv = gao_e1000e_recv,
+		.gao_xmit = gao_e1000e_xmit,
 		.gao_enable_rx_interrupts = gao_e1000e_enable_rx_interrupts,
 		.gao_enable_tx_interrupts = gao_e1000e_enable_tx_interrupts,
 		.gao_disable_rx_interrupts = gao_e1000e_disable_rx_interrupts,

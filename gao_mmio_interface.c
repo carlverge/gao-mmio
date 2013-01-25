@@ -140,7 +140,24 @@ static void	gao_transmit_arbiter(struct work_struct *work) {
 	hwqueue_capacity = ring->header.capacity;
 
 	for(;;) {
+
+		rcu_read_lock();
+
 		if(queue->state != GAO_RESOURCE_STATE_ACTIVE) goto deleting;
+
+		/*
+		 * 1. Do we need to stop scheduling?
+		 * 2. Block on egress queues
+		 * 3. Begin scheduling
+		 * 		a. How many can we schedule this round?
+		 * 		b. Schedule SW queues into HW queue.
+		 * 4. Xmit Frames (hw specific)
+		 * 		a. Reconcile HW Queue and NIC Ring
+		 * 		b. How many can we xmit now?
+		 * 		c. Below threshold?
+		 * 			yes: block until above min tx threshold again
+		 * 		d. Return number we can xmit
+		 */
 
 
 
@@ -169,10 +186,11 @@ static void	gao_transmit_arbiter(struct work_struct *work) {
 			}
 
 			//Empty the subqueue
-			rmb();
+
 			subqueue_head = subqueue->header.head;
 			subqueue_tail = subqueue->header.tail;
 			subqueue_capacity = subqueue->header.capacity;
+			rmb();
 
 			log_dp("Start scheduling subqueue %lu, tail=%lu head=%lu", (unsigned long)subqueue_index, (unsigned long)subqueue_tail, (unsigned long)subqueue_head);
 			subqueue_tail = CIRC_NEXT(subqueue_tail, subqueue_capacity);
@@ -188,8 +206,8 @@ static void	gao_transmit_arbiter(struct work_struct *work) {
 			subqueue_tail = CIRC_PREV(subqueue_tail, subqueue_capacity);
 			log_dp("Done scheduling subqueue %lu, setting tail=%lu", (unsigned long)subqueue_index, (unsigned long)subqueue_tail);
 
-			subqueue->header.tail = subqueue_tail;
 			wmb();
+			subqueue->header.tail = subqueue_tail;
 			subqueue_bits &= ~(1 << subqueue_index);
 		}
 
@@ -197,9 +215,16 @@ static void	gao_transmit_arbiter(struct work_struct *work) {
 
 		if(frames_this_round < 64) log_dp("Would block on xmit");
 
+
 		/*
 		 * Transmit to HW, block until we have enough space for another scheduling loop
 		 */
+
+
+
+
+		rcu_read_unlock();
+
 
 //		log_debug("Starting scheduler loop for queue %lu", (unsigned long)queue->index);
 //		atomic_long_set(ring->control.head_wake_condition_ref, 0);
@@ -210,9 +235,111 @@ static void	gao_transmit_arbiter(struct work_struct *work) {
 
 
 	deleting:
+	rcu_read_unlock();
 	log_debug("Stopping scheduler for queue %lu", (unsigned long)queue->index);
 	return;
 }
+
+
+static void	gao_priority_scheduler(struct work_struct *work) {
+	struct gao_tx_arbiter 		*tx_arbiter = (struct gao_tx_arbiter*) work;
+	struct gao_port				*port = tx_arbiter->port;
+	struct gao_queue 			*queue = tx_arbiter->tx_queue;
+	struct gao_descriptor_ring 	*ring = queue->ring, *subqueue = NULL;
+	struct gao_descriptor		*descriptors = (struct gao_descriptor*)&queue->ring->descriptors;
+
+	uint64_t	sq_index, sq_bits, sq_head, sq_size, sq_limit;
+	uint64_t	index, size, frames_this_round;
+
+	log_debug("Starting scheduler for queue %lu", (unsigned long)queue->index);
+
+	frames_this_round = ring->header.capacity - 1;
+
+	for(;;) {
+		/*
+		 * 1. Do we need to stop scheduling?
+		 * 2. Block on egress queues
+		 * 3. Begin scheduling
+		 * 		a. How many can we schedule this round?
+		 * 		b. Schedule SW queues into HW queue.
+		 * 4. Xmit Frames (hw specific)
+		 * 		a. Reconcile HW Queue and NIC Ring
+		 * 		b. How many can we xmit now?
+		 * 		c. Below threshold?
+		 * 			yes: block until above min tx threshold again
+		 * 		d. Return number we can xmit
+		 */
+
+
+
+		//Block on the egress queues, wait to schedule.
+		wait_event_interruptible(ring->control.tail_wait_queue, (sq_bits = atomic_long_read(ring->control.tail_wake_condition_ref)));
+		rcu_read_lock();
+		if(queue->state != GAO_RESOURCE_STATE_ACTIVE) goto deleting;
+
+
+		index = ring->header.tail;
+		size = ring->header.capacity;
+
+		log_dp("start sched: ftr=%llu index/tail=%llu sq_bits=%llx", frames_this_round, index, sq_bits);
+
+		//Fully schedule each queue in increasing order
+		for(sq_index = (GAO_FFSL(sq_bits)-1); sq_bits && frames_this_round; sq_index = (GAO_FFSL(sq_bits)-1)) {
+
+			subqueue = queue->subqueues[sq_index].ring;
+
+			//Skip this queue if it's null -- this should never happen.
+			if(unlikely(!subqueue)) {
+				sq_bits &= ~(1 << sq_index);
+				continue;
+			}
+
+			sq_limit = gao_ring_num_elements(subqueue);
+			sq_head = subqueue->header.head;
+			sq_size = subqueue->header.capacity;
+
+			log_dp("start sq: ftr=%llu sq_head=%llu sq_limit=%llu index=%llu sq_bits=%llx", frames_this_round, sq_head, sq_limit, index, sq_bits);
+
+			rmb();
+
+			for(; sq_limit && frames_this_round; sq_limit--, frames_this_round--) {
+				log_dp("sched sq: ftr=%llu sq_head=%llu sq_limit=%llu index=%llu sq_desc=%016llx desc=%016llx", frames_this_round, sq_head, sq_limit, index, subqueue->descriptors[sq_head].descriptor, descriptors[index].descriptor);
+				swap_descriptors(&subqueue->descriptors[sq_head], &descriptors[index]);
+				sq_head = CIRC_NEXT(sq_head, sq_size), index = CIRC_NEXT(index, size);
+			}
+
+			wmb();
+			subqueue->header.head = sq_head;
+
+
+			if(!sq_limit) sq_bits &= ~(1 << sq_index);
+			log_dp("done sq: ftr=%llu sq_head=%llu index=%llu sq_bits=%llx", frames_this_round, sq_head, index, sq_bits);
+		}
+
+
+
+		atomic_long_set(ring->control.tail_wake_condition_ref, sq_bits);
+		log_dp("done sched: ftr=%llu index/tail=%llu sq_bits=%llx", frames_this_round, index, sq_bits);
+		//Scheduling over, xmit the frames from this round. Set the frames for next round to what the TX ring has left.
+		ring->header.tail = index;
+		frames_this_round = port->port_ops->gao_xmit(queue);
+
+		//TODO: Blocking code goes here
+
+
+
+
+
+	}
+
+
+
+	deleting:
+	rcu_read_unlock();
+	log_debug("Stopping scheduler for queue %lu", (unsigned long)queue->index);
+	return;
+}
+
 
 /**
  * Allocate and configure generic parameters for an interface coming up.
@@ -236,7 +363,8 @@ int64_t		gao_activate_port(struct gao_port* port) {
 	//Start the transmit arbiters
 	for(index = 0; index < port->num_tx_queues; index++) {
 		port->tx_arbiters[index].tx_queue = port->tx_queues[index];
-		INIT_WORK(&port->tx_arbiters[index].work, gao_transmit_arbiter);
+		port->tx_arbiters[index].port = port;
+		INIT_WORK(&port->tx_arbiters[index].work, gao_priority_scheduler);
 		queue_work(port->tx_arbiter_workqueue, &port->tx_arbiters[index].work);
 	}
 

@@ -730,7 +730,7 @@ static int64_t	gao_create_egress_subqueue(struct gao_resources *resources, struc
 	check_ptr_val(-ENOMEM, subqueue->ring);
 
 	subqueue->ring->header.head = 0;
-	subqueue->ring->header.tail = (num_descriptors - 1);
+	subqueue->ring->header.tail = 0;
 
 	log_debug("Successfully created subqueue.");
 	return 0;
@@ -1276,6 +1276,21 @@ static int64_t	gao_init_ports(struct gao_resources *resources) {
 	resources->free_ports = GAO_MAX_PORTS;
 	return 0;
 }
+
+/**
+ * Returns the number of free slots (minus 1)
+ * @param
+ * @return
+ */
+uint64_t	gao_ring_slots_left(struct gao_descriptor_ring* ring) {
+	return ((ring->header.capacity - CIRC_DIFF64(ring->header.write, ring->header.read, ring->header.capacity)) - 1);
+}
+EXPORT_SYMBOL(gao_ring_slots_left);
+
+uint64_t	gao_ring_num_elements(struct gao_descriptor_ring* ring) {
+	return CIRC_DIFF64(ring->header.write, ring->header.read, ring->header.capacity);
+}
+EXPORT_SYMBOL(gao_ring_num_elements);
 
 
 int		gao_lock_resources(struct gao_resources* resources) {

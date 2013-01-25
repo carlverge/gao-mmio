@@ -79,7 +79,7 @@
 #define CIRC_DIFF32(b,a,max) ((b-a) + (max*(((b-a) & 0x80000000)>>31)))
 #define CIRC_DIFF64(b,a,max) ((b-a) + (max*(((b-a) & 0x8000000000000000)>>63)))
 
-
+#define GAO_FFSL(x)	__builtin_ffsl(x)
 
 
 #endif /* GAO_MMIO_CONSTANTS_H_ */

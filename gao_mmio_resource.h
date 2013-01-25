@@ -120,8 +120,15 @@ struct	gao_descriptor {
 
 
 struct gao_descriptor_ring_header {
-	uint64_t				head;
-	uint64_t				tail;
+	union {
+		uint64_t				head;
+		uint64_t				read;
+	};
+	union {
+		uint64_t				tail;
+		uint64_t				write;
+	};
+
 	uint64_t				capacity; //Total space in the queue, regardless of occupancy
 	uint64_t				size; //Total number of occupants
 };
@@ -243,7 +250,9 @@ struct gao_descriptor_ring_control {
 
 
 
-//Rings can be mapped to userspace
+/**
+ * The descriptor rings always have one empty slot at the end
+ */
 struct gao_descriptor_ring {
 	//This gets mapped, but userspace jumps over it (doesn't need to see it)
 	struct		gao_descriptor_ring_control	control;
@@ -292,7 +301,7 @@ struct gao_queue {
 	//The mapping of port/queue id to egress queue.
 	struct gao_ingress_queue_map	queue_map;
 	//Pointer to a buffer of actions to map to packets to forward
-	struct gao_action				(*action_map)[];
+	struct gao_action				*action_map;
 
 	//The queues used for SW QOS, just make rings, don't need full queue struct.
 	struct gao_egress_subqueue		subqueues[GAO_MAX_PORT_SUBQUEUE];
@@ -320,14 +329,17 @@ struct gao_file_private {
 };
 
 struct gao_port_ops {
-	int64_t	(*gao_enable)(struct net_device*);
-	int64_t	(*gao_disable)(struct net_device*);
-	ssize_t	(*gao_read)(struct gao_file_private*, size_t size);
-	ssize_t	(*gao_write)(struct gao_file_private*, size_t size);
-	void	(*gao_enable_rx_interrupts)(struct gao_queue* queue);
-	void	(*gao_enable_tx_interrupts)(struct gao_queue* queue);
-	void	(*gao_disable_rx_interrupts)(struct gao_queue* queue);
-	void	(*gao_disable_tx_interrupts)(struct gao_queue* queue);
+	int64_t		(*gao_enable)(struct net_device*);
+	int64_t		(*gao_disable)(struct net_device*);
+	ssize_t		(*gao_read)(struct gao_file_private*, size_t size);
+	ssize_t		(*gao_write)(struct gao_file_private*, size_t size);
+	uint64_t	(*gao_clean)(struct gao_queue*, size_t num_to_clean);
+	uint64_t	(*gao_recv)(struct gao_queue*, size_t num_to_read);
+	ssize_t		(*gao_xmit)(struct gao_queue*);
+	void		(*gao_enable_rx_interrupts)(struct gao_queue* queue);
+	void		(*gao_enable_tx_interrupts)(struct gao_queue* queue);
+	void		(*gao_disable_rx_interrupts)(struct gao_queue* queue);
+	void		(*gao_disable_tx_interrupts)(struct gao_queue* queue);
 };
 
 
@@ -340,6 +352,7 @@ typedef enum gao_port_qos_mode {
 struct gao_tx_arbiter {
 	struct work_struct	work;
 	struct gao_queue	*tx_queue;
+	struct gao_port		*port;
 };
 
 struct gao_port {
@@ -553,7 +566,8 @@ int64_t		gao_register_port(struct net_device *netdev, struct gao_port_ops* if_op
 int64_t		gao_activate_port(struct gao_port* port);
 void		gao_deactivate_port(struct gao_port* port);
 
-
+uint64_t	gao_ring_slots_left(struct gao_descriptor_ring*);
+uint64_t	gao_ring_num_elements(struct gao_descriptor_ring*);
 
 /* End of kernel-only functions */
 #endif
