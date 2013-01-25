@@ -17,7 +17,7 @@
 
 #include "e1000.h"
 #include "../gao_mmio_resource.h"
-#include "../log.h"
+#include "../gao_log.h"
 
 
 /* Send an interrupt when there is 8*8=64 frames pending to TX*/

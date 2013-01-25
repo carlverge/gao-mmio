@@ -21,7 +21,7 @@
 #include <sys/ioctl.h>
 #include <sched.h>
 #include <ctype.h>
-#include <log.h>
+#include <gao_log.h>
 #include <gao_mmio_resource.h>
 
 /**

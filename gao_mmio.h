@@ -24,7 +24,6 @@
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include "log.h"
 #include "gao_mmio_resource.h"
 
 #endif /* GAO_MMIO_H_ */

@@ -31,7 +31,7 @@
 #include <stdint.h>
 #include <net/if.h>
 #endif
-#include "log.h"
+#include "gao_log.h"
 #include "gao_mmio_constants.h"
 
 
