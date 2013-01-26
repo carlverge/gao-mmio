@@ -749,7 +749,8 @@ static int64_t	gao_create_egress_subqueue(struct gao_resources *resources, struc
  * @param queue_index
  */
 static void	gao_free_queue(struct gao_resources *resources, struct gao_queue *queue) {
-
+	size_t	alloc_size;
+	void	*pipeline_addr;
 	log_debug("Deleting queue at %p", queue);
 
 	if(!queue) return;
@@ -758,6 +759,27 @@ static void	gao_free_queue(struct gao_resources *resources, struct gao_queue *qu
 	gao_free_descriptor_ring(resources, queue->ring);
 
 	if(queue->action_map) vfree(queue->action_map);
+
+	if(queue->descriptor_pipeline) {
+		pipeline_addr = queue->descriptor_pipeline;
+		alloc_size = queue->descriptor_pipeline_size;
+		for(pipeline_addr = queue->descriptor_pipeline; pipeline_addr < ((void*)queue->descriptor_pipeline) + alloc_size; pipeline_addr += PAGE_SIZE) {
+			ClearPageReserved(vmalloc_to_page(pipeline_addr));
+		}
+
+		vfree(queue->descriptor_pipeline);
+	}
+
+	if(queue->action_pipeline) {
+		pipeline_addr = queue->action_pipeline;
+		alloc_size = queue->action_pipeline_size;
+		for(pipeline_addr = queue->action_pipeline; pipeline_addr < ((void*)queue->action_pipeline) + alloc_size; pipeline_addr += PAGE_SIZE) {
+			ClearPageReserved(vmalloc_to_page(pipeline_addr));
+		}
+
+		vfree(queue->action_pipeline);
+	}
+
 
 	vfree(queue);
 
@@ -771,8 +793,10 @@ static void	gao_free_queue(struct gao_resources *resources, struct gao_queue *qu
  * @param size The size of the queue in descriptors.
  * @return The index of the new queue on success, -ENOMEM (if insufficient memory/resources), -EFBIG if queue too big.
  */
-static struct gao_queue*	gao_create_queue(struct gao_resources *resources, uint64_t num_descriptors) {
-	struct gao_queue* queue = NULL;
+static struct gao_queue*	gao_create_queue(struct gao_resources *resources, uint64_t num_descriptors, gao_direction_t direction) {
+	struct gao_queue* 	queue = NULL;
+	size_t				alloc_size = 0;
+	void*				pipeline_addr;
 	log_debug("Creating queue, size=%lu", (unsigned long)num_descriptors);
 
 
@@ -785,11 +809,42 @@ static struct gao_queue*	gao_create_queue(struct gao_resources *resources, uint6
 
 	queue->ring = gao_create_descriptor_ring(resources, num_descriptors);
 	check_ptr(queue->ring);
-	//gao_dump_descriptor_ring(queue->ring);
 
-	queue->action_map = vmalloc(sizeof(struct gao_action)*num_descriptors);
-	check_ptr(queue->ring);
 
+	if(direction == GAO_DIRECTION_RX) {
+		queue->action_map = vmalloc(sizeof(struct gao_action)*num_descriptors);
+		check_ptr(queue->action_map);
+
+		//The following two structs are mmap'd to userspace. Allocate them as a multiple of the page size.
+		//I really suck at number theory.
+		alloc_size = (sizeof(struct gao_descriptor)*num_descriptors*GAO_ING_PIPELINE_DEPTH);
+		alloc_size = (alloc_size % PAGE_SIZE) ? alloc_size + (PAGE_SIZE-(alloc_size%PAGE_SIZE)) : alloc_size;
+		queue->descriptor_pipeline = vmalloc(alloc_size);
+		check_ptr(queue->descriptor_pipeline);
+		queue->descriptor_pipeline_size = alloc_size;
+		memset((void*)queue->descriptor_pipeline, 0, alloc_size);
+
+		log_debug("Allocated descriptor pipeline size %lu B at %p", alloc_size, queue->descriptor_pipeline);
+
+		//Reserve the pages
+		for(pipeline_addr = queue->descriptor_pipeline; pipeline_addr < ((void*)queue->descriptor_pipeline) + alloc_size; pipeline_addr += PAGE_SIZE) {
+			SetPageReserved(vmalloc_to_page(pipeline_addr));
+		}
+
+		alloc_size = (sizeof(struct gao_action)*num_descriptors*GAO_ING_PIPELINE_DEPTH);
+		alloc_size = (alloc_size % PAGE_SIZE) ? alloc_size + (PAGE_SIZE-(alloc_size%PAGE_SIZE)) : alloc_size;
+		queue->action_pipeline = vmalloc(sizeof(struct gao_action)*num_descriptors*GAO_ING_PIPELINE_DEPTH);
+		check_ptr(queue->action_pipeline);
+		queue->action_pipeline_size = alloc_size;
+		memset((void*)queue->action_pipeline, 0, alloc_size);
+
+		log_debug("Allocated action pipeline size %lu B at %p", alloc_size, queue->action_pipeline);
+
+		//Reserve the pages
+		for(pipeline_addr = queue->action_pipeline; pipeline_addr < ((void*)queue->action_pipeline) + alloc_size; pipeline_addr += PAGE_SIZE) {
+			SetPageReserved(vmalloc_to_page(pipeline_addr));
+		}
+	}
 
 	queue->descriptors = num_descriptors;
 	queue->state = GAO_RESOURCE_STATE_REGISTERED;
@@ -876,7 +931,7 @@ static void	gao_free_port_queue(struct gao_resources *resources, struct gao_queu
 	queue->hw_private = NULL;
 
 
-	//TODO: If it is bound to a file, don't delete it. The file will see the state on next file op and clean it up.
+	//If it is bound to a file, don't delete it. The file will see the state on next file op and clean it up.
 	if(!queue->binding.gao_file) {
 		gao_free_queue(resources, queue);
 	} else {
@@ -1101,12 +1156,12 @@ int64_t gao_create_port_queues(struct gao_resources* resources, struct gao_port 
 	if(!port) gao_bug_val(-EFAULT, "Null Port");
 
 	if(port->num_rx_queues > GAO_MAX_PORT_HWQUEUE || port->num_tx_queues > GAO_MAX_PORT_HWQUEUE)
-			gao_error_val(-ENOMEM, "Interface asking for too many queues! (%u/%u)", (unsigned int)port->num_rx_queues, (unsigned int)port->num_tx_queues);
+			gao_error_val(-ENOMEM, "Interface asking for too many queues! (%u/%u)", port->num_rx_queues, port->num_tx_queues);
 
 
 	//Loop and allocate rx queues, assign pointers
 	for(index = 0; index < port->num_rx_queues; index++) {
-		queue = gao_create_queue(resources, port->num_rx_desc);
+		queue = gao_create_queue(resources, port->num_rx_desc, GAO_DIRECTION_RX);
 		if(!queue) gao_error_val(-ENOMEM, "Failed to alloc rx if queue idx %ld", (long)index);
 
 		queue->binding.owner_type = GAO_QUEUE_OWNER_PORT;
@@ -1120,7 +1175,7 @@ int64_t gao_create_port_queues(struct gao_resources* resources, struct gao_port 
 	}
 
 	for(index = 0; index < port->num_tx_queues; index++) {
-		queue = gao_create_queue(resources, port->num_tx_desc);
+		queue = gao_create_queue(resources, port->num_tx_desc, GAO_DIRECTION_RX);
 		if(!queue) gao_error_val(-ENOMEM, "Failed to alloc tx if queue idx %ld", (long)index);
 
 		queue->binding.owner_type = GAO_QUEUE_OWNER_PORT;
@@ -1139,10 +1194,10 @@ int64_t gao_create_port_queues(struct gao_resources* resources, struct gao_port 
 
 	//All queues created successfully, put them in other ports' queue maps.
 	ret = gao_port_bind_egress_to_ingress_queue_map(resources, port);
-	if(ret) gao_error("Failed to bind egress queues to other ports (ret=%lu)", (unsigned long)ret);
+	if(ret) gao_error("Failed to bind egress queues to other ports (ret=%llu)", ret);
 	//Get other ports' queues and put them in our map.
 	ret = gao_port_bind_ingress_to_egress_subqueues(resources, port);
-	if(ret) gao_error("Failed to bind other egress queues to this port (ret=%lu)", (unsigned long)ret);
+	if(ret) gao_error("Failed to bind other egress queues to this port (ret=%llu)", ret);
 
 
 	return 0;
@@ -1165,8 +1220,7 @@ int64_t	gao_bind_queue(struct file* filep, struct gao_request_queue *request) {
 	struct gao_queue *queue = NULL;
 	struct gao_resources* resources = gao_get_resources();
 
-	log_debug("File %p requesting to bind to if/q %lu/%lu",
-			filep, (unsigned long)request->gao_ifindex, (unsigned long)request->queue_index);
+	log_debug("File %p requesting to bind to if/q %llu/%llu", filep, request->gao_ifindex, request->queue_index);
 
 	gao_dump_file(filep);
 
@@ -1176,13 +1230,12 @@ int64_t	gao_bind_queue(struct file* filep, struct gao_request_queue *request) {
 
 	//Are we ready and unbound?
 	if(gao_file->state != GAO_RESOURCE_STATE_REGISTERED) {
-		gao_error_val(-EBUSY, "File already registered to (if/q) %lu/%lu",
-				(unsigned long)gao_file->bound_gao_ifindex, (unsigned long)gao_file->bound_queue_index);
+		gao_error_val(-EBUSY, "File already registered to (if/q) %llu/%llu",
+				gao_file->bound_gao_ifindex, gao_file->bound_queue_index);
 	}
 
 	if(request->gao_ifindex >= GAO_MAX_PORTS) {
-		gao_error_val(-EINVAL, "Requested ifindex out of range. (want=%lu max=%lu)",
-				(unsigned long)request->gao_ifindex, (unsigned long)GAO_MAX_PORTS)
+		gao_error_val(-EINVAL, "Requested ifindex out of range. (want=%llu max=%lu)", request->gao_ifindex, (unsigned long)GAO_MAX_PORTS);
 	}
 
 	port = &resources->ports[request->gao_ifindex];
@@ -1214,12 +1267,15 @@ int64_t	gao_bind_queue(struct file* filep, struct gao_request_queue *request) {
 	gao_file->port_ops = port->port_ops;
 	gao_file->state = GAO_RESOURCE_STATE_ACTIVE;
 
+	request->action_pipeline_size = queue->action_pipeline_size;
+	request->descriptor_pipeline_size = queue->descriptor_pipeline_size;
+	request->queue_size = queue->ring->header.capacity;
+
 	//gao_file->port_ops->gao_disable_tx_interrupts()
 
 	gao_dump_file(filep);
 
-	log_debug("Successfully bound file %p to if/q %lu/%lu",
-			filep, (unsigned long)request->gao_ifindex, (unsigned long)request->queue_index);
+	log_debug("Successfully bound file %p to if/q %llu/%llu", filep, request->gao_ifindex, request->queue_index);
 
 	gao_unlock_resources(resources);
 	return 0;
@@ -1245,8 +1301,7 @@ void	gao_unbind_queue(struct file* filep) {
 	if(!queue) gao_bug("File was active, but no queue pointer!");
 	queue->binding.gao_file = NULL;
 
-	log_debug("File %p requesting to unbind to if/q %lu/%lu",
-			filep, (unsigned long)gao_file->bound_gao_ifindex, (unsigned long)gao_file->bound_queue_index);
+	log_debug("File %p requesting to unbind to if/q %llu/%llu", filep, gao_file->bound_gao_ifindex, gao_file->bound_queue_index);
 
 	gao_file->bound_direction = GAO_DIRECTION_NONE;
 	gao_file->bound_gao_ifindex = 0;

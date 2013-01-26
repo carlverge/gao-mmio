@@ -303,6 +303,14 @@ struct gao_queue {
 	//Pointer to a buffer of actions to map to packets to forward
 	struct gao_action				*action_map;
 
+	//Allocated on RX only and is mmaped to userspace.
+	//Allows for pipelined Sched and forwarding + easy batching.
+	//Sized to num_descriptors * GAO_ING_PIPELINE_DEPTH elements
+	struct gao_descriptor			*descriptor_pipeline;
+	uint64_t						descriptor_pipeline_size;
+	struct gao_action				*action_pipeline;
+	uint64_t						action_pipeline_size;
+
 	//The queues used for SW QOS, just make rings, don't need full queue struct.
 	struct gao_egress_subqueue		subqueues[GAO_MAX_PORT_SUBQUEUE];
 
@@ -468,6 +476,8 @@ struct gao_request_queue {
 	uint64_t					queue_size;
 	uint64_t					gao_ifindex;
 	uint64_t					queue_index;
+	uint64_t					descriptor_pipeline_size;
+	uint64_t					action_pipeline_size;
 	gao_direction_t				direction_txrx;
 };
 
@@ -513,6 +523,7 @@ struct gao_request_port {
 #define GAO_IOCTL_COMMAND_QUEUE _IOWR(GAO_MAJOR_NUM, 0x11, struct gao_request_queue)
 #define GAO_IOCTL_COMMAND_PORT _IOWR(GAO_MAJOR_NUM, 0x12, struct gao_request_port)
 #define GAO_IOCTL_COMMAND_DUMP _IOWR(GAO_MAJOR_NUM, 0x13, gao_request_dump_t)
+#define GAO_IOCTL_SYNC_QUEUE	_IO(GAO_MAJOR_NUM, 0x14)
 
 
 #ifdef __KERNEL__

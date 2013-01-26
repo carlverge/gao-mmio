@@ -73,43 +73,88 @@ static int gao_release(struct inode *inode, struct file *filep) {
 
 int gao_mmap(struct file* filep, struct vm_area_struct* vma) {
 	uint64_t 	requested_length = vma->vm_end - vma->vm_start;
+	struct gao_file_private	*gao_file = filep->private_data;
+	struct gao_queue 		*queue = NULL;
 	unsigned long vm_addr, pfn, group_offset, group_addr, base_addr;
+	void*					queue_vm_addr;
+
 	//uint64_t 	buffer_length = ((uint64_t)GAO_BUFFER_GROUP_SIZE*(uint64_t)GAO_MAX_BUFFER_GROUPS);
 	int ret, index; //XXX: These should probably be int64_t ...
 
-	log_debug("Got MMAP request for length %lx base addr %lx", (unsigned long)requested_length, vma->vm_start);
+	if(gao_file->bound_queue) {
 
-	if(requested_length != resources.buffer_space_frame) {
-		gao_error_val(-EINVAL,  "Userspace requested invalid mmap size: %lu, can only map: %lu",
-				(unsigned long)requested_length, resources.buffer_space_frame);
-	}
+		log_debug("mmap: queue request for length %llu", requested_length);
+		queue = gao_file->bound_queue;
 
-	//Walk the space frame, and map allocated buffer groups, if unallocated map the dummy frame
-	for(group_offset = 0; group_offset < (resources.buffer_space_frame); group_offset += GAO_BUFFER_GROUP_SIZE) {
-		//log_debug("Lookup: base_offset=%lx", group_offset);
+		if(requested_length != (queue->descriptor_pipeline_size + queue->action_pipeline_size)) {
+			gao_error_val(-EINVAL,  "Userspace requested invalid mmap size: %llu, can only map: %llu",
+								requested_length, (queue->descriptor_pipeline_size + queue->action_pipeline_size));
+		}
 
-		//Is that a valid buffer group?
-		for(group_addr = 0, index = 0; index < GAO_BUFFER_GROUPS; index++) {
-			base_addr = (virt_to_phys(resources.buffer_groups[index]) - resources.buffer_start_phys);
-			if( base_addr == group_offset) {
-				group_addr = virt_to_phys(resources.buffer_groups[index]);
-				//log_debug("Found buffer group at index %d, phys=%lx, base=%lx", index, (unsigned long)virt_to_phys(resources.buffer_groups[index]), base_addr);
-				break;
+		vm_addr = vma->vm_start;
+
+		log_debug("Mapping descriptor pipeline.");
+		queue_vm_addr = queue->descriptor_pipeline;
+		while(queue_vm_addr < (((void*)queue->descriptor_pipeline) + queue->descriptor_pipeline_size)) {
+			pfn = vmalloc_to_pfn(queue_vm_addr);
+			ret = remap_pfn_range(vma, vm_addr, pfn, PAGE_SIZE, vma->vm_page_prot);
+			if(ret) gao_error("Failed to MMAP queue page to userspace: %d (addr %p)", ret, queue_vm_addr);
+
+			queue_vm_addr += PAGE_SIZE;
+			vm_addr += PAGE_SIZE;
+		}
+
+		log_debug("Mapping action pipeline.");
+		queue_vm_addr = queue->action_pipeline;
+		while(queue_vm_addr < (((void*)queue->action_pipeline) + queue->action_pipeline_size)) {
+			pfn = vmalloc_to_pfn(queue_vm_addr);
+			ret = remap_pfn_range(vma, vm_addr, pfn, PAGE_SIZE, vma->vm_page_prot);
+			if(ret) gao_error("Failed to MMAP queue page to userspace: %d (addr %p)", ret, queue_vm_addr);
+
+			queue_vm_addr += PAGE_SIZE;
+			vm_addr += PAGE_SIZE;
+		}
+
+
+	} else {
+
+		log_debug("mmap: buffer request for length %llu base addr %lx", requested_length, vma->vm_start);
+
+		if(requested_length != resources.buffer_space_frame) {
+			gao_error_val(-EINVAL,  "Userspace requested invalid mmap size: %lu, can only map: %lu",
+					(unsigned long)requested_length, resources.buffer_space_frame);
+		}
+
+		//Walk the space frame, and map allocated buffer groups, if unallocated map the dummy frame
+		for(group_offset = 0; group_offset < (resources.buffer_space_frame); group_offset += GAO_BUFFER_GROUP_SIZE) {
+			//log_debug("Lookup: base_offset=%lx", group_offset);
+
+			//Is that a valid buffer group?
+			for(group_addr = 0, index = 0; index < GAO_BUFFER_GROUPS; index++) {
+				base_addr = (virt_to_phys(resources.buffer_groups[index]) - resources.buffer_start_phys);
+				if( base_addr == group_offset) {
+					group_addr = virt_to_phys(resources.buffer_groups[index]);
+					//log_debug("Found buffer group at index %d, phys=%lx, base=%lx", index, (unsigned long)virt_to_phys(resources.buffer_groups[index]), base_addr);
+					break;
+				}
 			}
+
+			//Nope, map the dummy group
+			if(!group_addr) {
+				group_addr = virt_to_phys(resources.dummy_group);
+			}
+
+			vm_addr = vma->vm_start + (group_offset);
+			pfn = group_addr >> PAGE_SHIFT;
+
+			log_debug("Mapping: phys=%016lx pfn=%016lx -> vm=%016lx (%s)",
+					group_addr, group_addr >> PAGE_SHIFT, vm_addr, (group_addr==virt_to_phys(resources.dummy_group) ? "dummy":"buffer"));
+			ret = remap_pfn_range(vma, vm_addr, pfn, GAO_BUFFER_GROUP_SIZE, vma->vm_page_prot);
+			if(ret) gao_error("Failed to MMAP queue page to userspace: %d (offset %lx)", ret, group_offset);
 		}
 
-		//Nope, map the dummy group
-		if(!group_addr) {
-			group_addr = virt_to_phys(resources.dummy_group);
-		}
 
-		vm_addr = vma->vm_start + (group_offset);
-		pfn = group_addr >> PAGE_SHIFT;
 
-		log_debug("Mapping: phys=%016lx pfn=%016lx -> vm=%016lx (%s)",
-				group_addr, group_addr >> PAGE_SHIFT, vm_addr, (group_addr==virt_to_phys(resources.dummy_group) ? "dummy":"buffer"));
-		ret = remap_pfn_range(vma, vm_addr, pfn, GAO_BUFFER_GROUP_SIZE, vma->vm_page_prot);
-		if(ret) gao_error("Failed to MMAP queue page to userspace: %d (offset %lx)", ret, group_offset);
 	}
 
 	log_debug("MMAP Successful.");
@@ -173,6 +218,9 @@ long gao_ioctl_handle_queue(struct file * filep, unsigned long request_ptr) {
 
 		if(ret) request->response_code = GAO_RESPONSE_QUEUE_NOK;
 		else request->response_code = GAO_RESPONSE_QUEUE_OK;
+
+		ret = copy_to_user((void*)request_ptr, request, sizeof(struct gao_request_queue));
+		if(ret) gao_error("Copy to user failed.");
 
 		break;
 
@@ -272,119 +320,6 @@ static int64_t	gao_ioctl_handle_mmap(struct file *filep, unsigned long request_p
 }
 
 
-/**
- *
- * Command:
- *	GAO_IOCTL_COMMAND_GET_MMAP_SIZE:
- *		Return the size of the mmap area.
- *		Arg: Null
- *		Ret: Size of MMAP area in bytes, negative on error.
- * 	GAO_IOCTL_COMMAND_CREATE_QUEUE:
- * 		Create a queue for userspace.
- * 		Arg: Size of queue in descriptor blocks.
- * 		Ret: Positive or zero index of queue, or negative error code.
- * 	GAO_IOCTL_COMMAND_DELETE_QUEUE:
- * 		Delete a queue at the specified index.
- * 		Arg: Index of queue to delete.
- * 		Ret: 0 on success, negative on error.
- * 	GAO_IOCTL_COMMAND_DUMP_DESCRIPTORS:
- * 		Force the module to dump the descriptor group status to the kernel log.
- * 		Arg: Null
- * 		Ret: 0
- * @param filep
- * @param command
- * @param argument
- */
-long gao_ioctl (struct file * filep, unsigned int command, unsigned long argument_ptr) {
-	long ret;
-	gao_request_dump_t request_dump;
-
-	log_debug("IOCTL: Got an ioctl with %u command and %lx arg", command, argument_ptr);
-
-	switch(command) {
-	case GAO_IOCTL_COMMAND_GET_MMAP_SIZE:
-
-		ret = gao_ioctl_handle_mmap(filep, argument_ptr);
-
-
-		//log_debug("IOCTL: Returning MMAP area size: %ld bytes.", resources.buffer_space_frame);
-		return ret;
-		break;
-
-	case GAO_IOCTL_COMMAND_PORT:
-		if(!argument_ptr) gao_error_val(-EFAULT, "IOCTL: Null argument pointer.");
-		ret = gao_ioctl_handle_port(filep, argument_ptr);
-
-		break;
-	case GAO_IOCTL_COMMAND_QUEUE:
-		if(!argument_ptr) gao_error_val(-EFAULT, "IOCTL: Null argument pointer.");
-		ret = gao_ioctl_handle_queue(filep, argument_ptr);
-		break;
-
-//	case GAO_IOCTL_COMMAND_CREATE_QUEUE:
-//		if(!argument_ptr) gao_error_val(-EFAULT, "IOCTL: Null argument pointer.");
-//		copy_from_user(&argument, (void*) argument_ptr, sizeof(argument));
-//
-//		log_debug("IOCTL: Create a queue of size %lu", argument);
-//
-//		ret = gao_create_queue_user(&gao_mmio_dev.queue_manager, &gao_mmio_dev.descriptor_manager, argument, filep);
-//		if(ret < 0) gao_error("IOCTL: Create queue failed to create queue, errno %ld", ret);
-//
-//		return ret;
-//		break;
-
-//	case GAO_IOCTL_COMMAND_DELETE_QUEUE:
-//		if(!argument_ptr) gao_error_val(-EFAULT, "IOCTL: Null argument pointer.");
-//		copy_from_user(&argument, (void*) argument_ptr, sizeof(argument));
-//
-//		log_debug("IOCTL: Deleting a queue with index %lu", argument);
-//
-//		ret = gao_delete_queue(&gao_mmio_dev.queue_manager, &gao_mmio_dev.descriptor_manager, argument);
-//		if(ret < 0) gao_error("IOCTL: Delete queue failed to delete queue index %lu, errno %ld", argument, ret);
-//
-//		return ret;
-//		break;
-//
-	case GAO_IOCTL_COMMAND_DUMP:
-		if(!argument_ptr) gao_error_val(-EFAULT, "IOCTL: Null argument pointer.");
-		ret = copy_from_user(&request_dump, (void*) argument_ptr, sizeof(request_dump));
-		if(ret) gao_error("Copy from user failed.");
-
-		gao_ioctl_dump(filep, request_dump);
-
-		break;
-
-//	case GAO_IOCTL_COMMAND_BIND_QUEUE:
-//		if(!argument_ptr) gao_error_val(-EFAULT, "IOCTL: Null argument pointer.");
-//		copy_from_user(&bind_queue_req, (void*) argument_ptr, sizeof(struct gao_ioctl_bind_queue));
-//
-//		log_debug("IOCTL: Binding to ifindex %lu queue %lu direction %u",
-//				(unsigned long)bind_queue_req.if_index,(unsigned long)bind_queue_req.queue_index,
-//				bind_queue_req.direction);
-//		ret = gao_bind_queue(&bind_queue_req, filep);
-//
-//		return ret;
-//		break;
-//
-//
-//	case GAO_IOCTL_COMMAND_DETACH_QUEUE:
-//		log_debug("IOCTL: Detach Interface");
-//		gao_detach_queue(filep);
-//		return 0;
-//
-//		break;
-
-	default:
-		gao_error_val(-EFAULT, "IOCTL: Unsupported IOCTL command: %u", command);
-		break;
-	}
-
-
-	return 0;
-	err:
-	return ret;
-}
-
 
 /**
  * Assumptions allowed:
@@ -461,17 +396,6 @@ ssize_t gao_read(struct file *filep, char __user *descriptor_buf, size_t num_to_
 	}
 
 
-//	if(ret > 0) {
-//
-//		if(index >= hw_ring->next_to_clean) {
-//
-//			copy_to_user((void*)descriptor_buf, (void*)&(*gao_descriptors)[hw_ring->next_to_clean], (index - hw_ring->next_to_clean)*sizeof(struct gao_descriptor));
-//		}else{
-//			copy_to_user(descriptor_buf, &(*gao_descriptors)[hw_ring->next_to_clean], (size - hw_ring->next_to_clean)*sizeof(struct gao_descriptor));
-//			copy_to_user(descriptor_buf + ((size - hw_ring->next_to_clean)*sizeof(struct gao_descriptor)) , &(*gao_descriptors)[0], index*sizeof(struct gao_descriptor));
-//		}
-//
-//	}
 
 	err:
 	rcu_read_unlock();
@@ -494,7 +418,9 @@ inline static void gao_unlock_subqueue(struct gao_descriptor_ring *ring) {
 
 //static log_
 //inline static int64_t gao_queue_descriptor()
-
+/**
+ * TODO: Marked for deletion
+ */
 ssize_t gao_write_old(struct file *filep, const char __user *action_buf, size_t num_frames, loff_t *offset) {
 	ssize_t ret = 0;
 	struct gao_file_private *file_private = (struct gao_file_private*)filep->private_data;
@@ -703,7 +629,8 @@ ssize_t gao_write(struct file *filep, const char __user *action_buf, size_t num_
 	struct gao_descriptor_ring	*dest_queue = NULL;
 	struct gao_descriptor 	*descriptors = NULL;
 	struct gao_action 		*action = NULL;
-	uint64_t				action_index, index, size, num_to_forward,previous_wake_condition;
+	uint64_t				action_index, index, size, num_to_forward, previous_wake_condition;
+
 
 	rcu_read_lock();
 
@@ -798,6 +725,286 @@ ssize_t gao_write(struct file *filep, const char __user *action_buf, size_t num_
 
 	err:
 	rcu_read_unlock();
+	return ret;
+}
+
+
+
+
+long	gao_sync_queue(struct file *filep) {
+	ssize_t 				ret = 0;
+	struct gao_file_private *file_private = (struct gao_file_private*)filep->private_data;
+	struct gao_queue 		*queue = NULL;
+	struct gao_descriptor_ring	*dest_queue = NULL;
+	struct gao_descriptor 	*descriptors = NULL;
+	struct gao_action 		*action = NULL;
+	uint64_t				prefetch_index, action_index, index, size, num_to_forward,previous_wake_condition, last_head, new_head;
+
+	rcu_read_lock();
+
+	if(unlikely(file_private->state != GAO_RESOURCE_STATE_ACTIVE))
+		gao_error_val(-EIO, "Cannot read from inactive queue");
+
+	queue = file_private->bound_queue;
+
+	if(unlikely(!queue))
+		gao_error_val(-EIO, "Reading null queue");
+
+	if(unlikely(queue->state != GAO_RESOURCE_STATE_ACTIVE))
+		gao_error_val(-EIO, "Cannot read from inactive queue");
+
+
+
+	//Find the max number of frames outstanding to forward
+	num_to_forward = gao_ring_slots_left(queue->ring);
+	log_dp("fwd check: can fwd %llu", num_to_forward);
+
+	//Initialize ring variables
+	size = queue->ring->header.capacity;
+	index = CIRC_NEXT(queue->ring->header.tail, size);
+	descriptors = (struct gao_descriptor*)&queue->ring->descriptors;
+
+	log_dp("start fwd: index/next_to_clean=%llu left=%llu", index, num_to_forward);
+
+//	for(prefetch_index = 0; prefetch_index < 4; prefetch_index++) {
+//		prefetch(queue->action_pipeline + (prefetch_index*16));
+//		prefetch(descriptors + (prefetch_index*8));
+//	}
+
+	//Main action apply loop
+	for(action_index = 0; action_index < num_to_forward; action_index++, index = CIRC_NEXT(index, size)) {
+
+		action = &queue->action_pipeline[action_index];
+
+		if(unlikely(action->action & GAO_INVALID_ACTION_MASK)) {
+			log_bug("fwd drop: invalid action=%#08x", action->action);
+			continue;
+		}
+
+
+		switch(action->action_id) {
+
+		case GAO_ACTION_DROP:
+			log_error("fwd drop: action_id is drop");
+			continue;
+
+		case GAO_ACTION_FORWARD:
+			dest_queue = queue->queue_map.port[action->port_id].ring[action->queue_id];
+
+			if(unlikely(!dest_queue)) {
+				log_error("fwd drop: null dest queue");
+				continue;
+			}
+
+			gao_lock_subqueue(dest_queue);
+
+
+			if(!gao_ring_slots_left(dest_queue)) {
+				log_error("fwd drop: no slots left");
+				gao_unlock_subqueue(dest_queue);
+				continue;
+			}
+
+
+			swap_descriptors(&descriptors[index], &dest_queue->descriptors[dest_queue->header.tail]);
+			dest_queue->header.tail = CIRC_NEXT(dest_queue->header.tail, dest_queue->header.capacity);
+
+			//Wake the endpoint
+			previous_wake_condition = test_and_set_bit(action->queue_id, (unsigned long*)dest_queue->control.tail_wake_condition_ref);
+
+			log_dp("fwd: action_index=%llu port=%hhu queue=%hhu index=%llu new dest_tail=%llu prev_wake_cond=%llx",
+					action_index, action->port_id, action->queue_id, index, dest_queue->header.tail, previous_wake_condition);
+
+			if(!(previous_wake_condition & ~(1 << action->queue_id))) {
+				wake_up_interruptible(dest_queue->control.tail_wait_queue_ref);
+			}
+
+
+			gao_unlock_subqueue(dest_queue);
+			break;
+
+		default:
+			break;
+
+		}
+	}
+
+//	for(prefetch_index = 0; prefetch_index < 4; prefetch_index++) {
+//		prefetch(queue->descriptor_pipeline + (prefetch_index*8));
+//		prefetch(descriptors + (prefetch_index*8));
+//	}
+	ret = file_private->port_ops->gao_clean(queue, num_to_forward);
+
+
+	read_again:
+
+	last_head = queue->ring->header.head;
+	ret = file_private->port_ops->gao_recv(queue, size);
+
+	//Got something
+	if(unlikely(ret < 0)) gao_error("Error while reading fd %p", filep);
+
+	if(ret > 0) {
+
+		new_head = queue->ring->header.head;
+		log_dp("Got %ld descriptors, copying to userspace. last_head=%lu new_head=%lu",
+						ret, (unsigned long)last_head, (unsigned long)new_head);
+
+		//Copy the ring descriptors to the linear buffer in the right order
+		if( new_head >= last_head) {
+			memcpy( ((void*)queue->descriptor_pipeline), (void*)&descriptors[last_head], (new_head - last_head)*sizeof(struct gao_descriptor) );
+		}else{
+			memcpy( ((void*)queue->descriptor_pipeline), (void*)&descriptors[last_head], (size - last_head)*sizeof(struct gao_descriptor));
+			memcpy( ((void*)queue->descriptor_pipeline) + ((size - last_head)*sizeof(struct gao_descriptor)) , (void*)&descriptors[0], new_head*sizeof(struct gao_descriptor));
+		}
+
+	}else{ //Didn't read anything, block
+		rcu_read_unlock();
+		atomic_long_set(queue->ring->control.head_wake_condition_ref, 0);
+		file_private->port_ops->gao_enable_rx_interrupts(queue);
+		if(wait_event_interruptible(queue->ring->control.head_wait_queue, atomic_long_read(&queue->ring->control.head_wake_condition) )) {
+			ret = -EINTR;
+			log_debug("Read on %p interrupted", filep);
+			goto interrupted;
+		}
+
+		rcu_read_lock();
+		//Check the states again to make sure the queue is still valid.
+		if(unlikely(file_private->state != GAO_RESOURCE_STATE_ACTIVE))
+			gao_error_val(-EIO, "Cannot read from inactive queue");
+
+		if(unlikely(!queue))
+			gao_error_val(-EIO, "Reading null queue");
+
+		if(unlikely(queue->state != GAO_RESOURCE_STATE_ACTIVE))
+			gao_error_val(-EIO, "Cannot read from inactive queue");
+
+		file_private->port_ops->gao_disable_rx_interrupts(queue);
+		goto read_again;
+	}
+
+
+
+	err:
+	rcu_read_unlock();
+	interrupted:
+	return ret;
+}
+
+/**
+ *
+ * Command:
+ *	GAO_IOCTL_COMMAND_GET_MMAP_SIZE:
+ *		Return the size of the mmap area.
+ *		Arg: Null
+ *		Ret: Size of MMAP area in bytes, negative on error.
+ * 	GAO_IOCTL_COMMAND_CREATE_QUEUE:
+ * 		Create a queue for userspace.
+ * 		Arg: Size of queue in descriptor blocks.
+ * 		Ret: Positive or zero index of queue, or negative error code.
+ * 	GAO_IOCTL_COMMAND_DELETE_QUEUE:
+ * 		Delete a queue at the specified index.
+ * 		Arg: Index of queue to delete.
+ * 		Ret: 0 on success, negative on error.
+ * 	GAO_IOCTL_COMMAND_DUMP_DESCRIPTORS:
+ * 		Force the module to dump the descriptor group status to the kernel log.
+ * 		Arg: Null
+ * 		Ret: 0
+ * @param filep
+ * @param command
+ * @param argument
+ */
+long gao_ioctl (struct file *filep, unsigned int command, unsigned long argument_ptr) {
+	long ret;
+	gao_request_dump_t request_dump;
+
+	log_dp("IOCTL: Got an ioctl with %u command and %lx arg", command, argument_ptr);
+
+	switch(command) {
+
+	case GAO_IOCTL_SYNC_QUEUE:
+		return gao_sync_queue(filep);
+
+	case GAO_IOCTL_COMMAND_GET_MMAP_SIZE:
+
+		ret = gao_ioctl_handle_mmap(filep, argument_ptr);
+
+
+		//log_debug("IOCTL: Returning MMAP area size: %ld bytes.", resources.buffer_space_frame);
+		return ret;
+		break;
+
+	case GAO_IOCTL_COMMAND_PORT:
+		if(!argument_ptr) gao_error_val(-EFAULT, "IOCTL: Null argument pointer.");
+		ret = gao_ioctl_handle_port(filep, argument_ptr);
+
+		break;
+	case GAO_IOCTL_COMMAND_QUEUE:
+		if(!argument_ptr) gao_error_val(-EFAULT, "IOCTL: Null argument pointer.");
+		ret = gao_ioctl_handle_queue(filep, argument_ptr);
+		break;
+
+//	case GAO_IOCTL_COMMAND_CREATE_QUEUE:
+//		if(!argument_ptr) gao_error_val(-EFAULT, "IOCTL: Null argument pointer.");
+//		copy_from_user(&argument, (void*) argument_ptr, sizeof(argument));
+//
+//		log_debug("IOCTL: Create a queue of size %lu", argument);
+//
+//		ret = gao_create_queue_user(&gao_mmio_dev.queue_manager, &gao_mmio_dev.descriptor_manager, argument, filep);
+//		if(ret < 0) gao_error("IOCTL: Create queue failed to create queue, errno %ld", ret);
+//
+//		return ret;
+//		break;
+
+//	case GAO_IOCTL_COMMAND_DELETE_QUEUE:
+//		if(!argument_ptr) gao_error_val(-EFAULT, "IOCTL: Null argument pointer.");
+//		copy_from_user(&argument, (void*) argument_ptr, sizeof(argument));
+//
+//		log_debug("IOCTL: Deleting a queue with index %lu", argument);
+//
+//		ret = gao_delete_queue(&gao_mmio_dev.queue_manager, &gao_mmio_dev.descriptor_manager, argument);
+//		if(ret < 0) gao_error("IOCTL: Delete queue failed to delete queue index %lu, errno %ld", argument, ret);
+//
+//		return ret;
+//		break;
+//
+	case GAO_IOCTL_COMMAND_DUMP:
+		if(!argument_ptr) gao_error_val(-EFAULT, "IOCTL: Null argument pointer.");
+		ret = copy_from_user(&request_dump, (void*) argument_ptr, sizeof(request_dump));
+		if(ret) gao_error("Copy from user failed.");
+
+		gao_ioctl_dump(filep, request_dump);
+
+		break;
+
+//	case GAO_IOCTL_COMMAND_BIND_QUEUE:
+//		if(!argument_ptr) gao_error_val(-EFAULT, "IOCTL: Null argument pointer.");
+//		copy_from_user(&bind_queue_req, (void*) argument_ptr, sizeof(struct gao_ioctl_bind_queue));
+//
+//		log_debug("IOCTL: Binding to ifindex %lu queue %lu direction %u",
+//				(unsigned long)bind_queue_req.if_index,(unsigned long)bind_queue_req.queue_index,
+//				bind_queue_req.direction);
+//		ret = gao_bind_queue(&bind_queue_req, filep);
+//
+//		return ret;
+//		break;
+//
+//
+//	case GAO_IOCTL_COMMAND_DETACH_QUEUE:
+//		log_debug("IOCTL: Detach Interface");
+//		gao_detach_queue(filep);
+//		return 0;
+//
+//		break;
+
+	default:
+		gao_error_val(-EFAULT, "IOCTL: Unsupported IOCTL command: %u", command);
+		break;
+	}
+
+
+	return 0;
+	err:
 	return ret;
 }
 
