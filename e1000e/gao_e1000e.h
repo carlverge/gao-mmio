@@ -910,7 +910,7 @@ ssize_t		gao_e1000e_write(struct gao_file_private *file_priv, size_t num_to_clea
  * @param gao_queue
  * @return The number of frames received.
  */
-uint64_t	gao_e1000e_clean(struct gao_queue *gao_queue, size_t num_to_clean) {
+ssize_t	gao_e1000e_clean(struct gao_queue *gao_queue, size_t num_to_clean) {
 	struct gao_descriptor	*gao_descriptors = (struct gao_descriptor*)&gao_queue->ring->descriptors;
 	struct e1000_adapter 	*adapter = (struct e1000_adapter*)gao_queue->hw_private;
 	struct e1000_ring 		*hw_ring = adapter->rx_ring;
@@ -953,13 +953,18 @@ uint64_t	gao_e1000e_clean(struct gao_queue *gao_queue, size_t num_to_clean) {
  * @param gao_queue
  * @return The number of frames received.
  */
-uint64_t	gao_e1000e_recv(struct gao_queue *gao_queue, size_t num_to_read) {
+ssize_t	gao_e1000e_recv(struct gao_queue *gao_queue, size_t num_to_read) {
 	struct gao_descriptor	*gao_descriptors = (struct gao_descriptor*)&gao_queue->ring->descriptors;
 	struct e1000_adapter 	*adapter = (struct e1000_adapter*)gao_queue->hw_private;
 	struct e1000_ring 		*hw_ring = adapter->rx_ring;
 	union e1000_rx_desc_extended *hw_desc = NULL;
 	uint64_t				index = hw_ring->next_to_use, size = hw_ring->count, num_read;
 	uint32_t				staterr;
+
+	if(unlikely(test_bit(__E1000_DOWN, &adapter->state))) {
+		log_bug("abort recv: adapter down");
+		return -EIO;
+	}
 
 	hw_desc = E1000_RX_DESC_EXT(*hw_ring, index);
 	staterr = le32_to_cpu(hw_desc->wb.upper.status_error);
@@ -1007,6 +1012,12 @@ ssize_t	gao_e1000e_xmit(struct gao_queue *gao_queue) {
 	limit = gao_queue->ring->header.tail;
 
 	log_dp("start xmit: index/tail=%llu limit=%llu", index, limit);
+
+	if(unlikely(test_bit(__E1000_DOWN, &adapter->state))) {
+		log_bug("abort xmit: adapter down");
+		hw_ring->next_to_use = limit;
+		return (ssize_t)gao_ring_slots_left(gao_queue->ring);
+	}
 
 	for(; index != limit; index = CIRC_NEXT(index, size) ) {
 		hw_desc = E1000_TX_DESC(*hw_ring, index);

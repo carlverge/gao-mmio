@@ -341,8 +341,8 @@ struct gao_port_ops {
 	int64_t		(*gao_disable)(struct net_device*);
 	ssize_t		(*gao_read)(struct gao_file_private*, size_t size);
 	ssize_t		(*gao_write)(struct gao_file_private*, size_t size);
-	uint64_t	(*gao_clean)(struct gao_queue*, size_t num_to_clean);
-	uint64_t	(*gao_recv)(struct gao_queue*, size_t num_to_read);
+	ssize_t		(*gao_clean)(struct gao_queue*, size_t num_to_clean);
+	ssize_t		(*gao_recv)(struct gao_queue*, size_t num_to_read);
 	ssize_t		(*gao_xmit)(struct gao_queue*);
 	void		(*gao_enable_rx_interrupts)(struct gao_queue* queue);
 	void		(*gao_enable_tx_interrupts)(struct gao_queue* queue);

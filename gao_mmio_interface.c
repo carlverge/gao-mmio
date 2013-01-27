@@ -138,7 +138,6 @@ static void	gao_priority_scheduler(struct work_struct *work) {
 
 	log_debug("Starting scheduler for queue %lu", (unsigned long)queue->index);
 
-	set_user_nice(current, -21);
 
 	frames_this_round = ring->header.capacity - 1;
 
@@ -177,6 +176,7 @@ static void	gao_priority_scheduler(struct work_struct *work) {
 
 			//Skip this queue if it's null -- this should never happen.
 			if(unlikely(!subqueue)) {
+				log_bug("xmit: null subqueue");
 				sq_bits &= ~(1 << sq_index);
 				continue;
 			}
@@ -212,7 +212,7 @@ static void	gao_priority_scheduler(struct work_struct *work) {
 		frames_this_round = port->port_ops->gao_xmit(queue);
 
 		//TODO: Blocking code goes here
-
+		rcu_read_unlock();
 
 
 
