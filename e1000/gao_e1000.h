@@ -12,7 +12,6 @@
 
 #include "e1000.h"
 #include "../gao_mmio_resource.h"
-#include "../log.h"
 
 
 int64_t		gao_e1000_enable_gao_mode(struct net_device *netdev) {
