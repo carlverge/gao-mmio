@@ -58,20 +58,20 @@ void	gao_dump_interfaces(struct gao_resources *resources) {
 
 
 void	gao_unregister_port(struct net_device *netdev) {
-	struct gao_port *interface = NULL;
+	struct gao_port *port = NULL;
 	struct gao_resources *resources = gao_get_resources();
 
 	gao_lock_resources(resources);
 
-	interface = gao_get_port_from_ifindex(netdev->ifindex);
-	if(!interface) gao_error("Cannot unregister interface -- already unregistered: %s[%d]", netdev->name, netdev->ifindex);
+	port = gao_get_port_from_ifindex(netdev->ifindex);
+	if(!port) gao_error("Cannot unregister interface -- already unregistered: %s[%d]", netdev->name, netdev->ifindex);
 
-	log_debug("Unegistering interface %s, kifindex %d, ifindex %lu", netdev->name, netdev->ifindex, (unsigned long)interface->gao_ifindex);
+	log_debug("Unegistering interface %s, kifindex %d, ifindex %lu", netdev->name, netdev->ifindex, (unsigned long)port->gao_ifindex);
 	resources->ifindex_to_port_lut[netdev->ifindex] = NULL;
 
 
 	synchronize_rcu();
-	memset(interface, 0, sizeof(struct gao_port));
+	memset((void*)port, 0, sizeof(struct gao_port));
 
 	err:
 	gao_unlock_resources(resources);
@@ -84,7 +84,7 @@ int64_t		gao_register_port(struct net_device *netdev, struct gao_port_ops* if_op
 	int64_t ret = 0;
 	uint64_t index;
 	struct gao_resources *resources = gao_get_resources();
-	struct gao_port *interface = NULL;
+	struct gao_port *port = NULL;
 
 	log_debug("Registering interface %s, kifindex %d", netdev->name, netdev->ifindex);
 
@@ -96,27 +96,28 @@ int64_t		gao_register_port(struct net_device *netdev, struct gao_port_ops* if_op
 
 	//Walk the interface slots and find a free one
 	//Start at index 1 for openflow
-	for(index = 1; index < GAO_MAX_PORTS; index++) {
+	for(index = 1; index < GAO_MAX_PHYS_PORT; index++) {
 		if(resources->ports[index].state == GAO_RESOURCE_STATE_UNUSED) {
-			interface = &resources->ports[index];
-			memset(interface, 0, sizeof(struct gao_port));
+			port = &resources->ports[index];
+			memset((void*)port, 0, sizeof(struct gao_port));
 
-			interface->gao_ifindex = index;
-			interface->ifindex = netdev->ifindex;
-			strncpy((char*)&interface->name, (char*)&netdev->name, IFNAMSIZ);
-			interface->netdev = netdev;
-			interface->port_ops = if_ops;
-			interface->state = GAO_RESOURCE_STATE_REGISTERED;
+			port->gao_ifindex = index;
+			port->ifindex = netdev->ifindex;
+			strncpy((char*)&port->name, (char*)&netdev->name, IFNAMSIZ);
+			port->netdev = netdev;
+			port->port_ops = if_ops;
+			port->state = GAO_RESOURCE_STATE_REGISTERED;
+			port->type = GAO_PORT_PHYSICAL;
 
 			//Make sure everything is set before the pointer is.
 			wmb();
 
-			resources->ifindex_to_port_lut[interface->ifindex] = interface;
+			resources->ifindex_to_port_lut[port->ifindex] = port;
 			break;
 		}
 	}
 
-	if(!interface) gao_error_val(-ENOMEM, "Cannot register any more interfaces.");
+	if(!port) gao_error_val(-ENOMEM, "Cannot register any more interfaces.");
 
 	err:
 	gao_unlock_resources(resources);
@@ -359,6 +360,7 @@ int64_t		gao_disable_gao_port(struct gao_resources *resources, uint64_t ifindex)
 void gao_free_port_list(struct gao_request_port_list* list) {
 	if(list) vfree(list);
 }
+
 
 struct gao_request_port_list* gao_get_port_list(struct gao_resources* resources) {
 	uint64_t	index;

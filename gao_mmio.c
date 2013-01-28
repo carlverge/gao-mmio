@@ -31,6 +31,9 @@ inline unsigned long descriptor_to_phys_addr(uint64_t descriptor) {
 }
 EXPORT_SYMBOL(descriptor_to_phys_addr);
 
+inline void* descriptor_to_virt_addr(uint64_t descriptor) {
+	return GAO_DESC_TO_VIRT(descriptor);
+}
 
 static int gao_open(struct inode *inode, struct file *filep) {
 	int ret = 0;
@@ -327,7 +330,7 @@ static int64_t	gao_ioctl_handle_mmap(struct file *filep, unsigned long request_p
  * 	Queue is not being deleted
  * 	It is safe to read the queue until we release RCU lock
  */
-ssize_t gao_read(struct file *filep, char __user *descriptor_buf, size_t num_to_read, loff_t *offset) {
+ssize_t gao_read_old(struct file *filep, char __user *descriptor_buf, size_t num_to_read, loff_t *offset) {
 	ssize_t ret = 0;
 	uint64_t last_head, new_head, size;
 	struct gao_file_private *file_private = (struct gao_file_private*)filep->private_data;
@@ -622,142 +625,11 @@ ssize_t gao_write_old(struct file *filep, const char __user *action_buf, size_t 
 
 
 
-ssize_t gao_write(struct file *filep, const char __user *action_buf, size_t num_frames, loff_t *offset) {
-	ssize_t 				ret = 0;
-	struct gao_file_private *file_private = (struct gao_file_private*)filep->private_data;
-	struct gao_queue 		*queue = NULL;
+static void	gao_forward_frames(struct gao_queue* queue, uint64_t num_to_forward) {
 	struct gao_descriptor_ring	*dest_queue = NULL;
 	struct gao_descriptor 	*descriptors = NULL;
 	struct gao_action 		*action = NULL;
-	uint64_t				action_index, index, size, num_to_forward, previous_wake_condition;
-
-
-	rcu_read_lock();
-
-	if(unlikely(file_private->state != GAO_RESOURCE_STATE_ACTIVE))
-		gao_error_val(-EIO, "Cannot read from inactive queue");
-
-	queue = file_private->bound_queue;
-
-	if(unlikely(!queue))
-		gao_error_val(-EIO, "Reading null queue");
-
-	if(unlikely(queue->state != GAO_RESOURCE_STATE_ACTIVE))
-		gao_error_val(-EIO, "Cannot read from inactive queue");
-
-	//Find the max number of frames outstanding to forward
-	num_to_forward = gao_ring_slots_left(queue->ring);
-	log_dp("fwd check: can fwd %llu", num_to_forward);
-	num_to_forward = (num_frames > num_to_forward) ? num_to_forward : num_frames;
-
-	//Get the actions from userspace
-	ret = copy_from_user(queue->action_map, action_buf, sizeof(struct gao_action)*num_to_forward);
-	if(ret) gao_error("Copy from user failed.");
-
-	//Initialize ring variables
-	size = queue->ring->header.capacity;
-	index = CIRC_NEXT(queue->ring->header.tail, size);
-	descriptors = (struct gao_descriptor*)&queue->ring->descriptors;
-
-	log_dp("start fwd: index/next_to_clean=%llu left=%llu", index, num_to_forward);
-
-
-	//Main action apply loop
-	for(action_index = 0; action_index < num_to_forward; action_index++, index = CIRC_NEXT(index, size)) {
-
-		action = &queue->action_map[action_index];
-
-		if(unlikely(action->action & GAO_INVALID_ACTION_MASK)) {
-			log_bug("fwd drop: invalid action=%#08x", action->action);
-			continue;
-		}
-
-
-		switch(action->action_id) {
-
-		case GAO_ACTION_DROP:
-			log_dp("fwd drop: action_id is drop");
-			continue;
-
-		case GAO_ACTION_FORWARD:
-			dest_queue = queue->queue_map.port[action->port_id].ring[action->queue_id];
-
-			if(unlikely(!dest_queue)) {
-				log_dp("fwd drop: null dest queue");
-				continue;
-			}
-
-			gao_lock_subqueue(dest_queue);
-
-
-			if(!gao_ring_slots_left(dest_queue)) {
-				log_dp("fwd drop: no slots left");
-				gao_unlock_subqueue(dest_queue);
-				continue;
-			}
-
-
-			swap_descriptors(&descriptors[index], &dest_queue->descriptors[dest_queue->header.tail]);
-			dest_queue->header.tail = CIRC_NEXT(dest_queue->header.tail, dest_queue->header.capacity);
-
-			//Wake the endpoint
-			previous_wake_condition = test_and_set_bit(action->queue_id, (unsigned long*)dest_queue->control.tail_wake_condition_ref);
-
-			log_dp("fwd: action_index=%llu port=%hhu queue=%hhu index=%llu new dest_tail=%llu prev_wake_cond=%llx",
-					action_index, action->port_id, action->queue_id, index, dest_queue->header.tail, previous_wake_condition);
-
-			if(!(previous_wake_condition & ~(1 << action->queue_id))) {
-				wake_up_interruptible(dest_queue->control.tail_wait_queue_ref);
-			}
-
-
-			gao_unlock_subqueue(dest_queue);
-			break;
-
-		default:
-			break;
-
-		}
-	}
-
-
-	ret = file_private->port_ops->gao_clean(queue, num_to_forward);
-
-	err:
-	rcu_read_unlock();
-	return ret;
-}
-
-
-
-
-long	gao_sync_queue(struct file *filep) {
-	ssize_t 				ret = 0;
-	struct gao_file_private *file_private = (struct gao_file_private*)filep->private_data;
-	struct gao_queue 		*queue = NULL;
-	struct gao_descriptor_ring	*dest_queue = NULL;
-	struct gao_descriptor 	*descriptors = NULL;
-	struct gao_action 		*action = NULL;
-	uint64_t				prefetch_index, action_index, index, size, num_to_forward,previous_wake_condition, last_head, new_head;
-
-	rcu_read_lock();
-
-	if(unlikely(file_private->state != GAO_RESOURCE_STATE_ACTIVE))
-		gao_error_val(-EIO, "Cannot read from inactive queue");
-
-	queue = file_private->bound_queue;
-
-	if(unlikely(!queue))
-		gao_error_val(-EIO, "Reading null queue");
-
-	if(unlikely(queue->state != GAO_RESOURCE_STATE_ACTIVE))
-		gao_error_val(-EIO, "Cannot read from inactive queue");
-
-
-
-	//Find the max number of frames outstanding to forward
-	num_to_forward = gao_ring_slots_left(queue->ring);
-	log_dp("fwd check: can fwd %llu", num_to_forward);
+	uint64_t				action_index, index, size, previous_wake_condition;
 
 	//Initialize ring variables
 	size = queue->ring->header.capacity;
@@ -833,17 +705,48 @@ long	gao_sync_queue(struct file *filep) {
 //		prefetch(queue->descriptor_pipeline + (prefetch_index*8));
 //		prefetch(descriptors + (prefetch_index*8));
 //	}
-	ret = file_private->port_ops->gao_clean(queue, num_to_forward);
+
+}
+
+long	gao_sync_queue(struct file *filep) {
+	ssize_t 				ret = 0;
+	struct gao_file_private *file_private = (struct gao_file_private*)filep->private_data;
+	struct gao_queue 		*queue = NULL;
+	struct gao_descriptor 	*descriptors = NULL;
+	uint64_t				size, num_to_forward , last_head, new_head;
+
+	rcu_read_lock();
+
+	if(unlikely(file_private->state != GAO_RESOURCE_STATE_ACTIVE))
+		gao_error_val(-EIO, "Cannot read from inactive queue");
+
+	queue = file_private->bound_queue;
+
+	if(unlikely(!queue))
+		gao_error_val(-EIO, "Reading null queue");
+
+	if(unlikely(queue->state != GAO_RESOURCE_STATE_ACTIVE))
+		gao_error_val(-EIO, "Cannot read from inactive queue");
+
+
+
+	num_to_forward = gao_ring_slots_left(queue->ring);
+	gao_forward_frames(queue, num_to_forward);
+	file_private->port_ops->gao_clean(queue, num_to_forward);
 
 
 	read_again:
 
+	//We will save the current head -- if packets are read the new head will be the end of the read packets.
 	last_head = queue->ring->header.head;
+	size = queue->ring->header.capacity;
+	descriptors = (struct gao_descriptor*)&queue->ring->descriptors;
 	ret = file_private->port_ops->gao_recv(queue, size);
 
-	//Got something
-	if(unlikely(ret < 0)) gao_error("Error while reading fd %p", filep);
 
+
+	if(unlikely(ret < 0)) gao_error("Error while reading fd %p", filep);
+	//Got something
 	if(ret > 0) {
 
 		new_head = queue->ring->header.head;
@@ -890,6 +793,155 @@ long	gao_sync_queue(struct file *filep) {
 	interrupted:
 	return ret;
 }
+
+/**
+ * XXX: This is a hack, replace this if time permits.
+ * Perform a "write" to a descriptor in the controller port Rx queue to give
+ * userspace a descriptor with a certain length and offset to write to.
+ * Right now only works on the controller port
+ * @param frame_size The length to set the descriptor to.
+ * @param offset The offset for the descriptor
+ */
+ssize_t gao_write(struct file *filep, const char __user *action_buf, size_t num_frames, loff_t *offset) {
+	ssize_t 				ret = 0;
+	struct gao_file_private *file_private = (struct gao_file_private*)filep->private_data;
+	struct gao_queue 		*queue = NULL;
+	struct gao_descriptor_ring_header	*header = NULL;
+	struct gao_descriptor 	*ring_descriptors = NULL, *mmap_descriptors = NULL;
+	uint64_t				index, size;
+
+
+	rcu_read_lock();
+
+	if(unlikely(file_private->state != GAO_RESOURCE_STATE_ACTIVE))
+		gao_error_val(-EIO, "Cannot read from inactive queue");
+
+	//We can only write to the controller port
+	if(unlikely(file_private->bound_gao_ifindex != GAO_CONTROLLER_PORT_ID))
+		gao_error_val(-EIO, "Cannot write to non-controller queue.");
+
+	queue = file_private->bound_queue;
+
+	if(unlikely(!queue))
+		gao_error_val(-EIO, "Reading null queue");
+
+	if(unlikely(queue->state != GAO_RESOURCE_STATE_ACTIVE))
+		gao_error_val(-EIO, "Cannot read from inactive queue");
+
+	header = queue->hw_private;
+	if(unlikely(!header))
+		gao_bug_val(-EIO, "Queue had a null hw_private pointer.");
+
+
+	//Initialize ring variables
+	size = queue->ring->header.capacity;
+	index = header->head;
+	ring_descriptors = (struct gao_descriptor*)&queue->ring->descriptors;
+	mmap_descriptors = queue->descriptor_pipeline;
+	//Cap the number of injected frames to the ring capacity
+	num_frames = ((uint64_t)num_frames > (size - 1)) ? (size - 1) : num_frames;
+
+	for(index = 0; index < num_frames; index++) {
+		ring_descriptors[index].len = mmap_descriptors[index].len;
+	}
+
+	queue->ring->header.tail = size - 1;
+	queue->ring->header.head = num_frames;
+
+	log_dp("write: num_frames=%ld", num_frames);
+	ret = num_frames;
+
+	err:
+	rcu_read_unlock();
+	return ret;
+}
+
+
+/**
+ * Assumptions allowed:
+ * 	Queue pointer and HW pointer are valid
+ * 	Queue is not being deleted
+ * 	It is safe to read the queue until we release RCU lock
+ */
+ssize_t gao_read(struct file *filep, char __user *packet_buf, size_t packet_size, loff_t *offset) {
+	ssize_t ret = 0;
+	uint64_t size, packet_length;
+	struct gao_file_private *file_private = (struct gao_file_private*)filep->private_data;
+	struct gao_queue *queue = NULL;
+	struct gao_descriptor *descriptors = NULL;
+	struct gao_descriptor_ring_header	*header = NULL;
+
+	read_again:
+
+	rcu_read_lock();
+
+	if(unlikely(file_private->state != GAO_RESOURCE_STATE_ACTIVE))
+		gao_error_val(-EIO, "Cannot read from inactive queue");
+
+	//We can only write to the controller port
+	if(unlikely(file_private->bound_gao_ifindex != GAO_CONTROLLER_PORT_ID))
+		gao_error_val(-EIO, "Cannot write to non-controller queue.");
+
+	//FIXME: I think I just gave my code cancer
+	queue = gao_get_resources()->ports[GAO_CONTROLLER_PORT_ID].tx_queues[0];
+
+	if(unlikely(!queue))
+		gao_error_val(-EIO, "Reading null queue");
+
+	if(unlikely(queue->state != GAO_RESOURCE_STATE_ACTIVE))
+		gao_error_val(-EIO, "Cannot read from inactive queue");
+
+	header = queue->hw_private;
+	if(unlikely(!header))
+		gao_bug_val(-EIO, "Queue had a null hw_private pointer.");
+
+
+	descriptors = (struct gao_descriptor*)&queue->ring->descriptors;
+	header = queue->hw_private;
+	size = queue->ring->header.capacity;
+
+
+	log_dp("start controller xmit/read: index/tail=%llu left=%ld", header->tail, atomic_long_read(queue->ring->control.head_wake_condition_ref));
+
+	//The condition acts like a semaphore in this case, if there are no packets wait for some
+	rcu_read_unlock(); //We can't be deleted while we're bound anyways, unlock before the wait and copy to user
+	if(!atomic_long_read(queue->ring->control.head_wake_condition_ref)) {
+		if(wait_event_interruptible( queue->ring->control.head_wait_queue, atomic_long_read(&queue->ring->control.head_wake_condition) )) {
+			ret = -EINTR;
+			log_debug("Read on %p interrupted", filep);
+			goto interrupted;
+		}
+		goto read_again;
+	}
+
+
+
+	//There are packets waiting
+	packet_length = descriptors[header->tail].len;
+	ret = copy_to_user( (void*)packet_buf, descriptor_to_virt_addr(descriptors[header->tail].descriptor), packet_length );
+
+	header->tail = CIRC_NEXT(header->tail, size);
+
+	//If there are no more packets left, wake xmit
+	if(atomic_long_dec_and_test(queue->ring->control.head_wake_condition_ref)) {
+		wake_up_interruptible(queue->ring->control.head_wait_queue_ref);
+	}
+
+
+	if(ret) {
+		ret = -EIO;
+	} else {
+		ret = packet_length;
+	}
+
+	return ret;
+
+	err:
+	rcu_read_unlock();
+	interrupted:
+	return ret;
+}
+
 
 /**
  *

@@ -290,21 +290,25 @@ int64_t	gao_e1000_deactivate_port(struct net_device *netdev) {
 	return 0;
 }
 
-ssize_t		gao_e1000_read(struct gao_file_private *file_priv, size_t num_to_read) {
-	return num_to_read;
+ssize_t	gao_e1000_xmit(struct gao_queue *gao_queue) {
+	return -EIO;
 }
 
+ssize_t	gao_e1000_clean(struct gao_queue *gao_queue, size_t num_to_clean) {
+	return -EIO;
+}
 
-ssize_t		gao_e1000_write(struct gao_file_private *file_priv, size_t num_to_clean) {
-	return num_to_clean;
+ssize_t	gao_e1000_recv(struct gao_queue *gao_queue, size_t num_to_read) {
+	return -EIO;
 }
 
 
 struct gao_port_ops gao_e1000_port_ops = {
 		.gao_enable = gao_e1000_enable_gao_mode,
 		.gao_disable = gao_e1000_disable_gao_mode,
-		.gao_read = gao_e1000_read,
-		.gao_write = gao_e1000_write,
+		.gao_clean = gao_e1000_clean,
+		.gao_recv = gao_e1000_recv,
+		.gao_xmit = gao_e1000_xmit,
 		.gao_enable_rx_interrupts = gao_e1000_enable_rx_interrupts,
 		.gao_enable_tx_interrupts = gao_e1000_enable_tx_interrupts,
 		.gao_disable_rx_interrupts = gao_e1000_disable_rx_interrupts,

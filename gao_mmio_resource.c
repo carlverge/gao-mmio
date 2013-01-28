@@ -450,7 +450,6 @@ static int64_t	gao_init_descriptor_allocator_ring(struct gao_resources *resource
 			bufnum = (uint16_t)((unsigned long)(buffer_index/GAO_BUFFER_SIZE));
 
 			descriptor.len = 0;
-			descriptor.offset = 0;
 			descriptor.gfn = gfn;
 			descriptor.index = bufnum;
 
@@ -666,7 +665,7 @@ inline static void	gao_free_descriptor_ring(struct gao_resources *resources, str
  */
 static struct gao_descriptor_ring*	gao_create_descriptor_ring(struct gao_resources *resources, uint64_t num_descriptors) {
 	struct gao_descriptor_ring 	*ring = NULL;
-	uint64_t				queue_size = 0;
+	uint64_t				queue_size = 0, index;
 
 	queue_size = (sizeof(struct gao_descriptor_ring_header)
 			+ (sizeof(struct gao_descriptor)*num_descriptors));
@@ -674,10 +673,16 @@ static struct gao_descriptor_ring*	gao_create_descriptor_ring(struct gao_resourc
 	ring = vmalloc(queue_size);
 	check_ptr(ring);
 
-	memset(ring, 0, queue_size);
+	memset((void*)ring, 0, queue_size);
 
 	if(gao_get_descriptors(resources, &ring->descriptors, num_descriptors))
 		gao_error("User queue creation failed, insufficient descriptors.");
+
+	//Initialize the ring values
+	for(index = 0; index < num_descriptors; index++) {
+		ring->descriptors[index].len = 0;
+		ring->descriptors[index].offset = GAO_DEFAULT_OFFSET;
+	}
 
 	ring->header.capacity = num_descriptors;
 
@@ -797,18 +802,20 @@ static struct gao_queue*	gao_create_queue(struct gao_resources *resources, uint6
 	struct gao_queue* 	queue = NULL;
 	size_t				alloc_size = 0;
 	void*				pipeline_addr;
+	uint64_t			index = 0;
 	log_debug("Creating queue, size=%lu", (unsigned long)num_descriptors);
 
 
 	queue = vmalloc(sizeof(struct gao_queue));
 	check_ptr(queue);
 
-	memset(queue, 0, sizeof(struct gao_queue));
+	memset((void*)queue, 0, sizeof(struct gao_queue));
 
 
 
 	queue->ring = gao_create_descriptor_ring(resources, num_descriptors);
 	check_ptr(queue->ring);
+
 
 
 	if(direction == GAO_DIRECTION_RX) {
@@ -1175,7 +1182,7 @@ int64_t gao_create_port_queues(struct gao_resources* resources, struct gao_port 
 	}
 
 	for(index = 0; index < port->num_tx_queues; index++) {
-		queue = gao_create_queue(resources, port->num_tx_desc, GAO_DIRECTION_RX);
+		queue = gao_create_queue(resources, port->num_tx_desc, GAO_DIRECTION_TX);
 		if(!queue) gao_error_val(-ENOMEM, "Failed to alloc tx if queue idx %ld", (long)index);
 
 		queue->binding.owner_type = GAO_QUEUE_OWNER_PORT;
@@ -1323,12 +1330,13 @@ void	gao_unbind_queue(struct file* filep) {
 	return;
 }
 
-static void		gao_free_interfaces(struct gao_resources *resources) {
-	//TODO: Stub, fill in as needed.
+static void		gao_free_ports(struct gao_resources *resources) {
+	gao_controller_unregister_port(resources);
 }
 
 static int64_t	gao_init_ports(struct gao_resources *resources) {
 	resources->free_ports = GAO_MAX_PORTS;
+	gao_controller_register_port(resources);
 	return 0;
 }
 
@@ -1367,7 +1375,7 @@ EXPORT_SYMBOL(gao_unlock_resources);
 void	gao_free_resources(struct gao_resources *resources) {
 	log_debug("Start free resources.");
 
-	gao_free_interfaces(resources);
+	gao_free_ports(resources);
 	gao_free_descriptor_allocator_ring(resources);
 	gao_free_buffer_groups(resources);
 
@@ -1378,7 +1386,7 @@ int64_t		gao_init_resources(struct gao_resources *resources) {
 	int64_t	ret;
 	log_debug("Start initialize resources.");
 
-	memset(resources, 0, sizeof(struct gao_resources));
+	memset((void*)resources, 0, sizeof(struct gao_resources));
 
 	sema_init(&resources->allocation_lock, 1);
 	spin_lock_init(&resources->queue_lock);

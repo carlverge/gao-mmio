@@ -241,16 +241,40 @@ int64_t gao_disable_port(struct gao_context* context, uint64_t gao_ifindex) {
 }
 
 /**
- * Bind a file descriptor (not the context) to an RX queue on a port. This
- * allows for read/write operations. An FD can only be bound to one queue at
- * once, and only one fd can be bound to a queue.
- * @param fd The FD to bind with.
+ * Unbinds a file descriptor from a queue. Reads and writes will fail after this is done.
+ * @param fd
+ * @return 0 on success, negative on failure.
+ */
+void gao_unbind_queue(struct gao_queue_context* context) {
+
+	struct gao_request_queue request = {
+			.request_code = GAO_REQUEST_QUEUE_UNBIND,
+	};
+
+	if(context) {
+		ioctl(context->fd, GAO_IOCTL_COMMAND_QUEUE, &request);
+		gao_close_fd(context->fd);
+		free(context);
+	}
+
+
+	return;
+}
+
+/**
+ * Bind to an RX queue on a port. This allows for read/write operations. There can only be one
+ * binding to a queue at once.
  * @param gao_ifindex The GAO ifindex of the port to enable (not the kernel index).
  * @param queue_index The queue index within the port. Starts at 0.
- * @return 0 on success, negative on error.
+ * @return A new queue context containing information about the binding.
  */
-int64_t	gao_bind_queue(int fd, uint64_t gao_ifindex, uint64_t queue_index) {
+struct gao_queue_context*	gao_bind_queue(uint64_t gao_ifindex, uint64_t queue_index) {
+	struct gao_queue_context *context = NULL;
 	int64_t ret = 0;
+	void	*mmap_addr = NULL;
+	size_t	mmap_size;
+	int fd;
+
 	struct gao_request_queue request = {
 			.request_code = GAO_REQUEST_QUEUE_BIND,
 			.gao_ifindex = gao_ifindex,
@@ -258,30 +282,49 @@ int64_t	gao_bind_queue(int fd, uint64_t gao_ifindex, uint64_t queue_index) {
 			.direction_txrx = GAO_DIRECTION_RX,
 	};
 
+	context = malloc(sizeof(struct gao_queue_context));
+	check_ptr(context);
+	memset((void*)context, 0, sizeof(struct gao_queue_context));
+
+	//Open a new FD -- one to one mapping between queue and FDs
+	fd = gao_open_fd();
+	if(fd < 0) gao_error("Unable to open /dev/gaommio.");
+
+	//Perform the binding
 	ret = ioctl(fd, GAO_IOCTL_COMMAND_QUEUE, &request);
 	if(ret) gao_error("Failed to bind to port %lu queue %lu.", gao_ifindex, queue_index);
 
-	return 0;
+
+	//Get the descriptor and action buffers
+	log_debug("Attempting to MMAP Queue space");
+	mmap_size = request.descriptor_pipeline_size + request.action_pipeline_size;
+	mmap_addr = mmap(0, mmap_size, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_LOCKED, fd, 0);
+	if(mmap_addr == (void*)~0) gao_error("MMAP Failed.");
+	log_debug("MMAP Worked, got %p", mmap_addr);
+
+	context->fd = fd;
+	context->port_id = gao_ifindex;
+	context->queue_id = queue_index;
+	context->offset = mmap_addr;
+	context->descriptors_size = request.descriptor_pipeline_size;
+	context->actions_size = request.action_pipeline_size;
+	context->num_descriptors = request.queue_size;
+	context->current_grid = 0;
+
+	log_debug("Successfully bound to queue: fd=%d port=%lu queue=%lu addr=%p desc_size=%lu action_size=%lu queue_size=%lu grid=%lu",
+			context->fd, context->port_id, context->queue_id, context->offset, context->descriptors_size, context->actions_size,
+			context->num_descriptors, context->current_grid);
+
+
+	return context;
 	err:
-	return ret;
+	gao_unbind_queue(context);
+	return NULL;
 }
 
-/**
- * Unbinds a file descriptor from a queue. Reads and writes will fail after this is done.
- * @param fd
- * @return 0 on success, negative on failure.
- */
-int64_t gao_unbind_queue(int fd) {
-	int64_t ret = 0;
-	struct gao_request_queue request = {
-			.request_code = GAO_REQUEST_QUEUE_UNBIND,
-	};
-
-	ret = ioctl(fd, GAO_IOCTL_COMMAND_QUEUE, &request);
-	if(ret) gao_error("Failed to unbind from any queue.");
-
-	return 0;
-	err:
+int64_t gao_sync_queue(struct gao_queue_context* queue) {
+	int64_t ret;
+	ret = ioctl(queue->fd, GAO_IOCTL_SYNC_QUEUE, NULL);
 	return ret;
 }
 

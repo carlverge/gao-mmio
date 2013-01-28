@@ -926,6 +926,7 @@ ssize_t	gao_e1000e_clean(struct gao_queue *gao_queue, size_t num_to_clean) {
 
 	while( (index != head) && num_to_clean ) {
 		hw_desc = E1000_RX_DESC_EXT(*hw_ring, index);
+		gao_descriptors[index].offset = GAO_DEFAULT_OFFSET;
 		hw_desc->read.buffer_addr = cpu_to_le64(descriptor_to_phys_addr(gao_descriptors[index].descriptor));
 
 		log_dp("clean: index=%llu addr=%llx", index, hw_desc->read.buffer_addr);
@@ -1012,7 +1013,7 @@ ssize_t	gao_e1000e_xmit(struct gao_queue *gao_queue) {
 
 	log_dp("start xmit: index/tail=%llu limit=%llu", index, limit);
 
-	if(unlikely(test_bit(__E1000_DOWN, &adapter->state))) {
+	if(unlikely(test_bit(__E1000_DOWN, &adapter->state) || !netif_carrier_ok(adapter->netdev))) {
 		log_bug("abort xmit: adapter down");
 		hw_ring->next_to_use = limit;
 		return (ssize_t)gao_ring_slots_left(gao_queue->ring);
@@ -1047,8 +1048,6 @@ ssize_t	gao_e1000e_xmit(struct gao_queue *gao_queue) {
 struct gao_port_ops gao_e1000e_port_ops = {
 		.gao_enable = gao_e1000e_enable_gao_mode,
 		.gao_disable = gao_e1000e_disable_gao_mode,
-		.gao_read = gao_e1000e_read,
-		.gao_write = gao_e1000e_write,
 		.gao_clean = gao_e1000e_clean,
 		.gao_recv = gao_e1000e_recv,
 		.gao_xmit = gao_e1000e_xmit,

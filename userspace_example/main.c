@@ -39,8 +39,8 @@ void gao_mmio_example(void) {
 	for(index = 0; index < GAO_MAX_PORTS; index++) {
 		if(list->port[index].state == GAO_RESOURCE_STATE_UNUSED) continue;
 
-		//Save one of these for later, we will enable it.
-		highest_port_id = list->port[index].gao_ifindex;
+		//Save one of these for later, we will enable it. Don't use logical ports.
+		if(index < GAO_MAX_PHYS_PORT) highest_port_id = list->port[index].gao_ifindex;
 
 		log_debug("Port %02lu[%s/%ld]: Operational State: %s	Num Queues[RX/TX]: %u/%u",
 				list->port[index].gao_ifindex, (char*)&list->port[index].name, list->port[index].ifindex,
@@ -103,86 +103,159 @@ void gao_mmio_example(void) {
 }
 
 
-#define GAO_MAX_GRID_SIZE	256
+
 void gao_rx_tx_example(void) {
-	int64_t		ret, index, fd, num_descriptors;
-	//You will need to create descriptor and action buffers before connecting to a port.
-	//Only receive as much as you have buffer space for!
-	struct gao_descriptor 	descriptors[GAO_MAX_GRID_SIZE];
-	struct gao_action		actions[GAO_MAX_GRID_SIZE], action = {.action_id = GAO_ACTION_FORWARD, .port_id = 1, .queue_id = 0};
+	int64_t		ret, index;
+	struct gao_descriptor 	*descriptors;
+	struct gao_action		*actions, action = {.action_id = GAO_ACTION_FORWARD, .port_id = 1, .queue_id = 0};
+	//char					data_buf[8192];
 	void					*buf;
 	struct gao_context* context = gao_create_context();
+	struct gao_queue_context *queue = NULL;
 
-	//This is setting all the actions statically to forward to port 1 queue 0.
-	//Each action in this array directly correlates to the descriptors
-	for(index = 0; index < GAO_MAX_GRID_SIZE; index++) actions[index] = action;
 
-	//We will use port 1 in this example
-	//Make sure the port is in GAO mode
+
+//	struct sched_param sp = { .sched_priority = 50 };
+//
+//	ret = sched_setscheduler(0, SCHED_RR, &sp);
+//	log_info("Setting scheduling policy to RT, ret: %ld", ret);
+
+
 	ret = gao_enable_port(context, 1);
 	if(ret) gao_error("Failed to enable gao port 1");
 
-	//For each queue you listen on, a separate FD is required. Open a new one (and close it later).
-	log_info("Opening FD.");
-	if( (fd = gao_open_fd()) < 0 ) gao_error("Failed to get FD.");
 
-	//Bind the FD to an RX queue on the port. This allows you to read the packets coming in on that
-	//queue and make forwarding decisions. The ports and how many queues they have can be found using
-	//the gao_get_port_list function. In this case, statically bind to queue 0.
-	//The FD can only bind to one port at once, and the queue can only be bound to one FD at once.
-	log_info("Binding to queue 0 on port 0.");
-	if (gao_bind_queue(fd, 1, 0)) gao_error("Failed to bind to queue.");
+	log_info("Binding to queue 0 on port 1.");
+	queue = gao_bind_queue(1, 0);
+	if(!queue) gao_error("Failed to bind to queue.");
 
+	actions = (queue->offset + queue->descriptors_size);
+	for(index = 0; index < queue->num_descriptors; index++) actions[index] = action;
 
 
 	log_info("Reading from FD.");
+//	while(ret >= 0) {
+//
+//		ret = read(queue->fd, &descriptors, 256);
+//		if(ret < 0) gao_error("FD died.");
+//
+//		log_info("Read %ld pkts", ret);
+//		for(index = 0; index < ret; index++) {
+//			buf = (void*) GAO_DESC_TO_PKT(descriptors[index].descriptor, context->offset);
+//			log_info("Pkt %ld: Size %hu Buf %p", index, descriptors[index].len, buf);
+//			hexdump(buf, descriptors[index].len);
+//		}
+//
+//		log_debug("Forwarding...");
+//		ret = write(queue->fd, &actions, ret);
+//		if(ret < 0) gao_error("FD died.");
+//		log_debug("Done.");
+//	}
+
+	descriptors = queue->offset;
+
 	while(ret >= 0) {
 
-		//The size here is the maximum number of descriptors you want to read at once. It will never return
-		//more descriptors than GAO_MAX_GRID_SIZE in this case. It will return the number of descriptors read.
-		num_descriptors = read(fd, &descriptors, GAO_MAX_GRID_SIZE);
-		//If the read returns negative, there was a fatal read error on the port. Unbind and try to bind to it again.
-		if(num_descriptors < 0) gao_error("FD died.");
-
-		log_info("Read %ld pkts", num_descriptors);
-		//Loop over the descriptors and process them.
-		for(index = 0; index < num_descriptors; index++) {
-			//To access the packet data, use the GAO_DESC_TO_PKT macro. It takes two values:
-			//1. The descriptor.descriptor (this is a uint64_t)
-			//2. The context offset -- this is used to calculate the position of the packet in memory
-			buf = (void*) GAO_DESC_TO_PKT(descriptors[index].descriptor, context->offset);
-			//The length of the packet is in the descriptor (descriptor.len)
-			log_info("Pkt %ld: Size %hu Buf %p", index, descriptors[index].len, buf);
-			hexdump(buf, descriptors[index].len);
-		}
-
-		log_debug("Forwarding...");
-		//When write is called, it will forward num_descriptors starting from the first descriptor received in the read above.
-		//It will apply the actions in the actions array to the correlated descriptor. Eg, action[2] is applied to descriptor[2], etc...
-		//The action contains the action_id (drop or forward) and the port/queue id to send the packet to.
-		//In general, you should always process and forward all of the descriptors you received last cycle.
-		//Once forwarded, the descriptor information you got should be considered invalid.
-		ret = write(fd, &actions, num_descriptors);
-		//If the write returns negative, the port had a fatal read error.
+		ret = gao_sync_queue(queue);
 		if(ret < 0) gao_error("FD died.");
-		log_debug("Done.");
 
-		//XXX: The above is going to be changed later on so that there is only one call. It will return the number of packets RX'd,
-		// and you will have to process all of them. The next call will forward all packets RX'd on the last call.
-		// The descriptor and action arrays will be memory mapped. This will greatly reduce syscall overhead.
+		if(ret > 200) log_info("Read %ld pkts", ret);
+//		for(index = 0; index < ret; index++) {
+//			buf = (void*) GAO_DESC_TO_PKT(descriptors[index].descriptor, context->offset);
+//			log_info("Pkt %ld: Size %hu Buf %p", index, descriptors[index].len, buf);
+//			hexdump(buf, descriptors[index].len);
+//		}
+
 	}
 
 
 
+
+
+
+
 	err:
+	gao_unbind_queue(queue);
+	gao_free_context(context);
+	return;
+}
+
+
+void gao_controller_port_example(void) {
+	int64_t		ret, index;
+	struct gao_descriptor 	*descriptors;
+	struct gao_action		*actions, action = {.action_id = GAO_ACTION_FORWARD, .port_id = GAO_CONTROLLER_PORT_ID, .queue_id = 0};
+	char					data_buf[8192];
+	void					*buf;
+	struct gao_context* context = gao_create_context();
+	struct gao_queue_context *queue = NULL, *p1 = NULL;
+
+
+
+
+//	struct sched_param sp = { .sched_priority = 50 };
+//
+//	ret = sched_setscheduler(0, SCHED_RR, &sp);
+//	log_info("Setting scheduling policy to RT, ret: %ld", ret);
+
+	ret = gao_enable_port(context, 1);
+	if(ret) gao_error("Failed to enable gao port 1");
+
+
+	log_info("Binding to queue 0 on port 1.");
+	p1 = gao_bind_queue(1, 0);
+	if(!p1) gao_error("Failed to bind to queue.");
+
+	actions = (p1->offset + p1->descriptors_size);
+	for(index = 0; index < p1->num_descriptors; index++) actions[index] = action;
+
+
+	log_info("Binding to controller port queue.");
+	queue = gao_bind_queue(GAO_CONTROLLER_PORT_ID, 0);
+	if(!queue) gao_error("Failed to bind to controller port queue.");
+
+	actions = (queue->offset + queue->descriptors_size);
+	for(index = 0; index < queue->num_descriptors; index++) actions[index] = action;
+	descriptors = queue->offset;
+
+	for(index = 0; index < 5; index++) {
+		descriptors[index].len = 100;
+	}
+
+	log_info("Pushing 5 descriptors.");
+	ret = write(queue->fd, NULL, 5);
+	log_info("Returned %ld", ret);
+	//Oh hey look we got something on the controller port! Let us Rx it.
+	log_info("Sync queue to send descriptors");
+	ret = gao_sync_queue(queue);
+	log_info("Returned %ld", ret);
+
+
+	log_info("Reading from controller port");
+
+	while(ret >= 0) {
+
+		ret = gao_sync_queue(p1);
+		if(ret < 0) gao_error("FD died.");
+
+		ret = read(queue->fd, &data_buf, 8192);
+		if(ret < 0) gao_error("FD died.");
+		log_info("Got packet size %ld", ret);
+		hexdump(&data_buf, ret);
+	}
+
+
+	err:
+	gao_unbind_queue(queue);
 	gao_free_context(context);
 	return;
 }
 
 
 int main(void) {
-	gao_mmio_example();
+	//gao_mmio_example();
 	//gao_rx_tx_example();
+	gao_controller_port_example();
 	return 0;
 }
 

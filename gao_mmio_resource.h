@@ -85,6 +85,7 @@ typedef enum gao_queue_request_t {
 
 
 
+
 #define GAO_BUFFER_FILL_VAL			(0xDEADBEEF)
 #define GAO_BUFFER_TEST_STR_LEN		(16)
 #define GAO_BUFFER_TEST_STR_FMT		"GAO:GFN%04hx%04hx"
@@ -158,10 +159,10 @@ struct gao_descriptor_ring_header {
 #endif
 
 
-typedef enum gao_action_id {
+typedef enum gao_action_id_t {
 	GAO_ACTION_DROP = 0,
 	GAO_ACTION_FORWARD,
-} gao_action_id;
+} gao_action_id_t;
 
 #define GAO_INVALID_ACTION_MASK	(~(0x00077F01))
 
@@ -179,7 +180,10 @@ struct 			gao_action {
 };
 
 
-
+typedef enum gao_port_type_t {
+	GAO_PORT_PHYSICAL = 0,
+	GAO_PORT_CONTROLLER,
+} gao_port_type_t;
 
 
 
@@ -370,6 +374,7 @@ struct gao_port {
 	char					name[IFNAMSIZ];
 
 	gao_resource_state_t 	state;
+	gao_port_type_t			type;
 	struct net_device		*netdev; //Set by ethernet driver
 	struct gao_port_ops		*port_ops; //Set by ethernet driver
 
@@ -565,6 +570,9 @@ int64_t		gao_disable_gao_port(struct gao_resources *resources, uint64_t ifindex)
 
 int64_t		gao_bind_queue(struct file* filep, struct gao_request_queue *request);
 void		gao_unbind_queue(struct file* filep);
+
+void		gao_controller_unregister_port(struct gao_resources *resources);
+int64_t		gao_controller_register_port(struct gao_resources *resources);
 
 /* Exported functions */
 inline 		unsigned long descriptor_to_phys_addr(uint64_t descriptor);

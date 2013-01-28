@@ -18,6 +18,7 @@
 #define GAO_BUFFER_GROUPS 			(64)
 #define GAO_BUFFER_GROUP_SIZE 		(4*1024*1024) 	//4MB
 #define GAO_BUFFER_SIZE				(8192)		//8kB
+#define GAO_DEFAULT_OFFSET			(256)
 #define GAO_READ_WRITE_MEMORY_PROT	0	//Set to 1 to turn on copy_to_user/copy_from_user in read/writes
 
 
@@ -49,22 +50,19 @@
 #define GAO_DESCRIPTOR_SIZE			8
 
 //Queues
-//#define GAO_MAX_QUEUE_SIZE			32 //Size in descriptor groups
-//#define GAO_MAX_BOUND_QUEUES		32
 #define GAO_MAX_QUEUES				128
 #define GAO_MAX_PORT_QUEUES			8
 #define GAO_ING_PIPELINE_DEPTH		2
-//XXX: These calculations need to be done better...
-//#define GAO_MAX_QUEUE_SIZE_BYTES	((GAO_MAX_QUEUE_SIZE*GAO_DESCRIPTORS_PER_GROUP*GAO_DESCRIPTOR_SIZE)*2) //32
-//#define GAO_PAGES_PER_QUEUE			(GAO_MAX_QUEUE_SIZE_BYTES/GAO_SMALLPAGE_SIZE) //32
-//#define GAO_QUEUE_ORDER				5 //log2(32) (get_free_pages order)
-
-//MMAP
-//#define GAO_MMAP_SIZE				((unsigned long)((GAO_MAX_QUEUE_SIZE_BYTES*GAO_MAX_QUEUES)+(GAO_BUFFER_GROUP_SIZE*GAO_MAX_BUFFER_GROUPS)))
+#define GAO_CONTROLLER_BUFFERS		256
 
 
-//Interfaces
+//Ports
 #define GAO_MAX_PORTS				64
+#define GAO_CONTROLLER_PORT_ID		(GAO_MAX_PORTS - 1)
+#define GAO_MAX_PHYS_PORT			(GAO_MAX_PORTS - 2)
+
+
+
 #define GAO_MAX_PORT_HWQUEUE		64
 #define GAO_MAX_PORT_SUBQUEUE		8
 #define GAO_MAX_IFINDEX				256

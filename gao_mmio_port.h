@@ -25,7 +25,6 @@
 #include <linux/types.h>
 #include <linux/if.h>
 #include <linux/netdevice.h>
-#include "log.h"
 #include "gao_mmio_resource.h"
 
 
