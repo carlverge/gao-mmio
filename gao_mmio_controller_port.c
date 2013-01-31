@@ -59,10 +59,6 @@ void gao_controller_disable_tx_interrupts(struct gao_queue *queue) {
 
 
 ssize_t	gao_controller_xmit(struct gao_queue *gao_queue) {
-	struct gao_descriptor	*gao_descriptors = (struct gao_descriptor*)&gao_queue->ring->descriptors;
-	//struct e1000_adapter 	*adapter = (struct e1000_adapter*)gao_queue->hw_private;
-	//struct e1000_ring 		*hw_ring = adapter->tx_ring;
-	//struct e1000_tx_desc 	*hw_desc = NULL;
 	struct gao_descriptor_ring_header	*header = gao_queue->hw_private;
 	uint64_t				index = header->tail, size = gao_queue->ring->header.capacity, limit, num_to_xmit;
 
@@ -79,19 +75,8 @@ ssize_t	gao_controller_xmit(struct gao_queue *gao_queue) {
 	//When there are no more packets left, we are woken and can return.
 	wait_event_interruptible( gao_queue->ring->control.head_wait_queue, !atomic_long_read(&gao_queue->ring->control.head_wake_condition) );
 
-
-
-
-//	for(; index != limit; index = CIRC_NEXT(index, size) ) {
-//		hw_desc = E1000_TX_DESC(*hw_ring, index);
-//		log_dp("xmit: index=%llu desc=%016llx", index, gao_descriptors[index].descriptor);
-//		hw_desc->buffer_addr = cpu_to_le64(descriptor_to_phys_addr(gao_descriptors[index].descriptor));
-//		hw_desc->lower.data  = cpu_to_le32(gao_descriptors[index].len | GAO_E1000E_TXD_FLAGS);
-//		hw_desc->upper.data  = 0;
-//	}
-
 	header->tail = limit;
-	return (ssize_t)gao_ring_slots_left(gao_queue->ring);
+	return (gao_queue->ring->header.capacity - 1);
 }
 
 ssize_t	gao_controller_clean(struct gao_queue *gao_queue, size_t num_to_clean) {

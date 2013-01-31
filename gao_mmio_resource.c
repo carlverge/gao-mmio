@@ -173,13 +173,6 @@ void gao_dump_ports_nested(struct gao_resources *resources) {
 	}
 }
 
-//void	gao_dump_queues(struct gao_resources *resources) {
-//	uint64_t index;
-//	log_debug("Dump Queues:");
-//	for(index = 0; index < GAO_MAX_QUEUES; index++) {
-//		gao_dump_queue(&resources->queues[index]);
-//	}
-//}
 
 void	gao_dump_file(struct file *filep) {
 	struct gao_file_private *file_private = (struct gao_file_private*) filep->private_data;
@@ -561,38 +554,6 @@ static int64_t gao_get_descriptors(struct gao_resources *resources, struct gao_d
 }
 
 
-/**
- * Deletes a user queue, frees any descriptors it owns, and frees the user queue
- * memory. Depends on the parent queue still existing to know the number of descriptors to free.
- * @param resources
- * @param queue_index
- */
-//inline static void	gao_delete_user_queue(struct gao_resources *resources, struct gao_queue *queue) {
-//	void					*queue_kmalloc_ptr = queue->ring_kmalloc;
-//	struct gao_descriptor_ring 	*user_queue = queue->ring;
-//	uint64_t				num_descriptors = queue->descriptors;;
-//
-//
-//	if(num_descriptors) {
-//		if(!user_queue)
-//			log_bug("Deleting user queue: there were descriptors but we lost the user queue!");
-//		else
-//			gao_free_descriptors(resources, &user_queue->descriptors, num_descriptors);
-//
-//		queue->descriptors = 0;
-//	}
-//
-//	if(!queue_kmalloc_ptr)
-//		log_bug("Deleting user queue: missing queue_kmalloc_ptr!");
-//	else
-//		kfree_null(queue_kmalloc_ptr);
-//
-//	queue->ring = NULL;
-//	queue->ring_kmalloc = NULL;
-//
-//	return;
-//}
-
 inline static void	gao_free_descriptor_ring(struct gao_resources *resources, struct gao_descriptor_ring *ring) {
 
 	if(!ring) {
@@ -607,53 +568,6 @@ inline static void	gao_free_descriptor_ring(struct gao_resources *resources, str
 
 	return;
 }
-
-/**
- * Allocates an MMAPable user queue and allocates descriptors for it.
- * It will set the number of descriptors in the parent queue. The value can't be
- * held in the user queue, as userspace could mangle it.
- * @warning Caller must hold resource lock
- * @param resources
- * @param num_descriptors
- * @param queue_index The queue index to allocate for
- * @return 0 on success, -ENOMEM on failure, -EINVAL on out of bounds param.
- */
-//static int64_t	gao_create_user_queue(struct gao_resources *resources, struct gao_queue *queue, uint64_t num_descriptors) {
-//	int64_t 				ret = 0;
-//	void					*queue_kmalloc_ptr = NULL;
-//	struct gao_descriptor_ring 	*user_queue = NULL;
-//	uint64_t				queue_size = 0;
-//
-//
-//	queue_size = (sizeof(struct gao_descriptor_ring_header)
-//			+ (sizeof(struct gao_descriptor)*num_descriptors))
-//			+ (GAO_SMALLPAGE_SIZE * 2); //To guarantee page alignment
-//
-//	queue_kmalloc_ptr = kmalloc(queue_size, GFP_KERNEL);
-//
-//	if(!queue_kmalloc_ptr) {
-//		gao_error_val(-ENOMEM, "User queue creation failed, kmalloc failed! (num_descriptors=%lu, size=%lu)",
-//				(unsigned long)num_descriptors, (unsigned long)queue_size);
-//	}
-//
-//	memset(queue_kmalloc_ptr, 0, queue_size);
-//
-//	//Make sure MMAP pointer is page aligned
-//	user_queue = (struct gao_descriptor_ring*)((((uint64_t)queue_kmalloc_ptr) + (GAO_SMALLPAGE_SIZE - 1)) & PAGE_MASK);
-//
-//	//Get the descriptors for the queue, this locks the descriptor ring
-//	ret = gao_get_descriptors(resources, &user_queue->descriptors, num_descriptors);
-//	if(ret) gao_error_val(-ENOMEM, "User queue creation failed, insufficient descriptors.");
-//
-//	queue->ring = user_queue;
-//	queue->ring_kmalloc = queue_kmalloc_ptr;
-//	queue->descriptors = num_descriptors;
-//
-//	return 0;
-//	err:
-//	gao_delete_user_queue(resources, queue);
-//	return ret;
-//}
 
 
 /**
@@ -802,7 +716,6 @@ static struct gao_queue*	gao_create_queue(struct gao_resources *resources, uint6
 	struct gao_queue* 	queue = NULL;
 	size_t				alloc_size = 0;
 	void*				pipeline_addr;
-	uint64_t			index = 0;
 	log_debug("Creating queue, size=%lu", (unsigned long)num_descriptors);
 
 
@@ -978,7 +891,7 @@ void	gao_delete_port_queues(struct gao_resources *resources, struct gao_port *po
 			if(!queue) continue;
 			queue->state = GAO_RESOURCE_STATE_DELETING;
 			log_debug("Waking tx arbiter %lu for deletion", (unsigned long)index);
-			atomic_long_set(queue->ring->control.head_wake_condition_ref, 1);
+			atomic_long_set(queue->ring->control.head_wake_condition_ref, 0);
 			wake_up_interruptible(queue->ring->control.head_wait_queue_ref);
 			atomic_long_set(queue->ring->control.tail_wake_condition_ref, ~0);
 			wake_up_interruptible(queue->ring->control.tail_wait_queue_ref);
@@ -1366,11 +1279,28 @@ int		gao_lock_resources(struct gao_resources* resources) {
 EXPORT_SYMBOL(gao_lock_resources);
 
 
+void	gao_unlock_file(struct gao_file_private *gao_file) {
+	up(&gao_file->lock);
+	log_debug("Unlock GAO Filep bound to if/q %llu/%llu", gao_file->bound_gao_ifindex, gao_file->bound_queue_index);
+}
+
+
+int		gao_lock_file(struct gao_file_private *gao_file) {
+	int ret = 0;
+	log_debug("Trying to lock GAO Filep bound to if/q %llu/%llu", gao_file->bound_gao_ifindex, gao_file->bound_queue_index);
+	ret = down_interruptible(&gao_file->lock);
+	log_debug("Locked GAO Resources");
+	return ret;
+}
+
+
+
 void	gao_unlock_resources(struct gao_resources* resources) {
 	up(&resources->config_lock);
 	log_debug("Unlocking GAO Resources");
 }
 EXPORT_SYMBOL(gao_unlock_resources);
+
 
 void	gao_free_resources(struct gao_resources *resources) {
 	log_debug("Start free resources.");

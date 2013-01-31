@@ -574,6 +574,9 @@ void		gao_unbind_queue(struct file* filep);
 void		gao_controller_unregister_port(struct gao_resources *resources);
 int64_t		gao_controller_register_port(struct gao_resources *resources);
 
+void		gao_unlock_file(struct gao_file_private *gao_file);
+int			gao_lock_file(struct gao_file_private *gao_file);
+
 /* Exported functions */
 inline 		unsigned long descriptor_to_phys_addr(uint64_t descriptor);
 

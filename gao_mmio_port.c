@@ -298,7 +298,7 @@ int64_t		gao_enable_gao_port(struct gao_resources *resources, uint64_t ifindex) 
 
 	rcu_read_lock();
 
-	if(ifindex < 0 || ifindex >= GAO_MAX_PORTS) gao_error_val(-EFAULT, "Ifindex out of range: %lu.", (unsigned long)ifindex);
+	if(ifindex < 1 || ifindex >= GAO_MAX_PHYS_PORT) gao_error_val(-EFAULT, "Ifindex out of range: %lu.", (unsigned long)ifindex);
 	port = &resources->ports[ifindex];
 
 
@@ -334,7 +334,7 @@ int64_t		gao_disable_gao_port(struct gao_resources *resources, uint64_t ifindex)
 
 	rcu_read_lock();
 
-	if(ifindex < 0 || ifindex >= GAO_MAX_PORTS)
+	if(ifindex < 1 || ifindex >= GAO_MAX_PHYS_PORT)
 		gao_error_val(-EFAULT, "Ifindex out of range: %lu.", (unsigned long)ifindex);
 
 	port = &resources->ports[ifindex];
