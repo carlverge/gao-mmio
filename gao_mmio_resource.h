@@ -27,13 +27,14 @@
 #include <linux/fcntl.h>
 #include <linux/wait.h>
 #include <linux/rcupdate.h>
+
+
 #else
 #include <stdint.h>
 #include <net/if.h>
 #endif
 #include "gao_log.h"
 #include "gao_mmio_constants.h"
-
 
 typedef enum gao_owner_type_t {
 	GAO_QUEUE_OWNER_NONE = 0,

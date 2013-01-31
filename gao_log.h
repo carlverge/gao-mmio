@@ -19,6 +19,7 @@
 #include <stdio.h>
 #endif
 
+
 #define	LOG_LEVEL_DP		0x0012
 #define	LOG_LEVEL_DEBUG		0x0010
 #define	LOG_LEVEL_INFO		0x0008
@@ -28,6 +29,7 @@
 #define LOG_LEVEL_FATAL		0x0002
 #define LOG_LEVEL_OFF		0x0000
 #define GAO_LOG_LEVEL		LOG_LEVEL_DEBUG
+#define GAO_LOG_LOCK_ENABLE	1
 #define GAO_OUTPUT_FILE		stderr
 
 
@@ -74,6 +76,12 @@
 #define log_fatal(FMT, ...)	printk("[FATAL:%s:%d] " FMT "\n", __FILE__, __LINE__, ##__VA_ARGS__)
 #else
 #define log_fatal(FMT, ...)
+#endif
+
+#if GAO_LOG_LOCK_ENABLE > 0
+#define log_lock(FMT, ...)	printk("[LOCK:%s:%d] " FMT "\n", __FILE__, __LINE__, ##__VA_ARGS__)
+#else
+#define log_lock(FMT, ...)
 #endif
 
 #define check_ptr(PTR) if(PTR == NULL) { log_error("malloc Failed!"); goto err; }
@@ -131,6 +139,12 @@
 #define log_fatal(FMT, ...)	fprintf(GAO_OUTPUT_FILE, "[FATAL:%s:%d] " FMT "\n", __FILE__, __LINE__, ##__VA_ARGS__)
 #else
 #define log_fatal(FMT, ...)
+#endif
+
+#if GAO_LOG_LOCK_ENABLE > 0
+#define log_lock(FMT, ...)	fprintf(GAO_OUTPUT_FILE, "[LOCK:%s:%d] " FMT "\n", __FILE__, __LINE__, ##__VA_ARGS__)
+#else
+#define log_lock(FMT, ...)
 #endif
 
 #define check_ptr(PTR) if(PTR == NULL) { log_error("Malloc Failed!"); goto err; }
