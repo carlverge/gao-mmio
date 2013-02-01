@@ -501,24 +501,24 @@ typedef enum gao_response_port_num_t {
 } gao_response_port_num_t;
 
 
-
+struct gao_request_port_info {
+	uint64_t				gao_ifindex; //gao internal gao_ifindex
+	uint64_t				ifindex; //Kernel ifindex
+	char					name[IFNAMSIZ];
+	gao_resource_state_t 	state;
+	uint32_t				num_rx_queues;
+	uint32_t				num_tx_queues;
+};
 
 struct gao_request_port_list {
-	struct {
-		uint64_t				gao_ifindex; //gao internal gao_ifindex
-		uint64_t				ifindex; //Kernel ifindex
-		char					name[IFNAMSIZ];
-		gao_resource_state_t 	state;
-		uint32_t				num_rx_queues;
-		uint32_t				num_tx_queues;
-	}port [GAO_MAX_PORTS];
+	struct gao_request_port_info port[GAO_MAX_PORTS];
 };
 
 struct gao_request_port {
 	gao_request_port_num_t 			request_code;
 	gao_response_port_num_t 		response_code;
 	uint64_t						gao_ifindex;
-	struct gao_request_port_list	*port_list;
+	void							*data;
 };
 
 
@@ -557,6 +557,8 @@ void	gao_dump_file(struct file *filep);
 
 void 		gao_free_port_list(struct gao_request_port_list* list);
 struct gao_request_port_list* gao_get_port_list(struct gao_resources* resources);
+void		gao_free_port_info(struct gao_request_port_info* info);
+struct gao_request_port_info* gao_get_port_info(struct gao_resources* resources, uint64_t gao_ifindex);
 
 const char*	gao_resource_state_string(gao_resource_state_t state);
 

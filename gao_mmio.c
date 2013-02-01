@@ -246,6 +246,7 @@ long gao_ioctl_handle_port(struct file * filep, unsigned long request_ptr) {
 	long ret = 0;
 	struct gao_request_port	*request = NULL;
 	struct gao_request_port_list *list = NULL;
+	struct gao_request_port_info *info = NULL;
 
 	request = kmalloc(sizeof(struct gao_request_port), GFP_KERNEL);
 	check_ptr(request);
@@ -278,14 +279,26 @@ long gao_ioctl_handle_port(struct file * filep, unsigned long request_ptr) {
 		break;
 
 	case GAO_REQUEST_PORT_LIST:
-		if(!request->port_list) gao_error_val(-EINVAL, "Null port list buffer given for port list request.");
+		if(!request->data) gao_error_val(-EINVAL, "Null port list buffer given for port list request.");
 
 		list = gao_get_port_list(gao_get_resources());
 		check_ptr(list);
 
 		request->response_code = GAO_RESPONSE_PORT_OK;
-		ret = copy_to_user((void*)request->port_list, (void*)list, sizeof(struct gao_request_port_list));
+		ret = copy_to_user((void*)request->data, (void*)list, sizeof(struct gao_request_port_list));
 		gao_free_port_list(list);
+		if(ret) gao_error("Copy to user failed.");
+
+		break;
+	case GAO_REQUEST_PORT_GET_INFO:
+		if(!request->data) gao_error_val(-EINVAL, "Null port list buffer given for port list request.");
+
+		info = gao_get_port_info(gao_get_resources(), request->gao_ifindex);
+		check_ptr(info);
+
+		request->response_code = GAO_RESPONSE_PORT_OK;
+		ret = copy_to_user((void*)request->data, (void*)info, sizeof(struct gao_request_port_info));
+		gao_free_port_info(info);
 		if(ret) gao_error("Copy to user failed.");
 
 		break;
@@ -762,6 +775,7 @@ static int __init gao_mmio_init(void) {
 
     log_debug("GAOMMIO registered to Major: 10 Minor: %i Name: /dev/%s.", gao_miscdev.minor, gao_miscdev.name);
 
+    return 0;
     err:
     gao_mmio_exit();
     return ret;

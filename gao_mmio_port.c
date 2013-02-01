@@ -358,7 +358,7 @@ int64_t		gao_disable_gao_port(struct gao_resources *resources, uint64_t ifindex)
 
 
 void gao_free_port_list(struct gao_request_port_list* list) {
-	if(list) vfree(list);
+	if(list) kfree(list);
 }
 
 
@@ -367,7 +367,7 @@ struct gao_request_port_list* gao_get_port_list(struct gao_resources* resources)
 	struct gao_request_port_list* list = NULL;
 	struct gao_port *port = NULL;
 
-	list = vmalloc(sizeof(struct gao_request_port_list));
+	list = kmalloc(sizeof(struct gao_request_port_list), GFP_KERNEL);
 	check_ptr(list);
 
 	memset((void*)list, 0, sizeof(struct gao_request_port_list));
@@ -388,6 +388,41 @@ struct gao_request_port_list* gao_get_port_list(struct gao_resources* resources)
 	return list;
 	err:
 	gao_free_port_list(list);
+	return NULL;
+}
+
+
+
+void gao_free_port_info(struct gao_request_port_info* info) {
+	if(info) kfree(info);
+}
+
+struct gao_request_port_info* gao_get_port_info(struct gao_resources* resources, uint64_t gao_ifindex) {
+	struct gao_request_port_info* info = NULL;
+	struct gao_port *port = NULL;
+
+
+	if(gao_ifindex < 1 || gao_ifindex >= GAO_MAX_PORTS) gao_error("Invalid port number");
+
+	info = kmalloc(sizeof(struct gao_request_port_info), GFP_KERNEL);
+	check_ptr(info);
+
+	memset((void*)info, 0, sizeof(struct gao_request_port_info));
+
+
+	port = &resources->ports[gao_ifindex];
+
+	info->state = port->state;
+	info->gao_ifindex = port->gao_ifindex;
+	info->ifindex = port->ifindex;
+	memcpy(&info->name, &port->name, sizeof(port->name));
+	info->num_rx_queues = port->num_rx_queues;
+	info->num_tx_queues = port->num_tx_queues;
+
+
+	return info;
+	err:
+	gao_free_port_info(info);
 	return NULL;
 }
 

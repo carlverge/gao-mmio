@@ -154,6 +154,11 @@
 #define gao_bug(FMT, ...)	{ fprintf(GAO_OUTPUT_FILE, "[BUG:%s:%d] " FMT "\n", __FILE__, __LINE__, ##__VA_ARGS__); goto err; }
 #define gao_bug_val(VAL, FMT, ...)	{ ret = VAL; fprintf(GAO_OUTPUT_FILE, "[BUG:%s:%d] " FMT "\n", __FILE__, __LINE__, ##__VA_ARGS__); goto err; }
 
+#ifdef __cplusplus
+#define gao_error_throw(VAL, FMT, ...)	{ fprintf(GAO_OUTPUT_FILE, "[ERROR:%s:%d] " FMT "\n", __FILE__, __LINE__, ##__VA_ARGS__); throw (VAL); }
+#define gao_bug_throw(VAL, FMT, ...)	{ fprintf(GAO_OUTPUT_FILE, "[BUG:%s:%d] " FMT "\n", __FILE__, __LINE__, ##__VA_ARGS__); throw (VAL); }
+#endif
+
 
 #endif
 
