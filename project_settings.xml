@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<cdtprojectproperties>
+<section name="org.eclipse.cdt.internal.ui.wizards.settingswizards.IncludePaths">
+<language name="C Source File">
+<includepath>/usr/src/linux-headers-3.5.0-17-generic/include</includepath>
+<includepath>/usr/src/linux-headers-3.5.0-17-generic/arch/x86/include</includepath>
+<includepath>/usr/src/linux-headers-3.5.0-17/include</includepath>
+<includepath>/usr/src/linux-headers-3.5.0-17/arch/x86/include</includepath>
+
+</language>
+<language name="Object File">
+
+</language>
+<language name="Assembly Source File">
+
+</language>
+</section>
+<section name="org.eclipse.cdt.internal.ui.wizards.settingswizards.Macros">
+<language name="C Source File">
+<macro>
+<name>__KERNEL__</name><value>1</value>
+</macro>
+
+</language>
+<language name="Object File">
+
+</language>
+<language name="Assembly Source File">
+
+</language>
+</section>
+</cdtprojectproperties>
