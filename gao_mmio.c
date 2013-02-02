@@ -765,9 +765,9 @@ static int __init gao_mmio_init(void) {
 	log_info("Starting GAOMMIO.");
 
 
-
 	ret = misc_register(&gao_miscdev);
 	if(ret) gao_error("Failed to register device.");
+
 
 	ret = gao_init_resources(&resources);
 

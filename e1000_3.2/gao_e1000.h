@@ -12,10 +12,7 @@
 
 #include "e1000.h"
 #include "../gao_mmio_resource.h"
-<<<<<<< HEAD
-=======
 #include "../gao_log.h"
->>>>>>> branch 'master' of https://github.com/carlverge/gao-mmio.git
 
 
 int64_t		gao_e1000_enable_gao_mode(struct net_device *netdev) {

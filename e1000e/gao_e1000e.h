@@ -17,10 +17,7 @@
 
 #include "e1000.h"
 #include "../gao_mmio_resource.h"
-<<<<<<< HEAD
-=======
 #include "../gao_log.h"
->>>>>>> branch 'master' of https://github.com/carlverge/gao-mmio.git
 
 
 /* Send an interrupt when there is 8*8=64 frames pending to TX*/

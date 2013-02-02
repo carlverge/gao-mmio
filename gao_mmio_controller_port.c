@@ -172,7 +172,7 @@ int64_t	gao_controller_register_port(struct gao_resources *resources) {
 
 	port->gao_ifindex = GAO_CONTROLLER_PORT_ID;
 	port->ifindex = ~((uint64_t)0);
-	strncpy((char*)&port->name, port_name, strlen(port_name));
+	strncpy((char*)&port->_name, port_name, strlen(port_name));
 	port->netdev = NULL;
 	port->port_ops = &gao_controller_port_ops;
 	port->state = GAO_RESOURCE_STATE_REGISTERED;

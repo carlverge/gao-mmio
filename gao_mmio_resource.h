@@ -372,7 +372,8 @@ struct gao_port {
 	//TODO: Persistence: map an constant identifier like the HW address to the gao_ifindex
 	uint64_t				gao_ifindex; //gao internal gao_ifindex
 	uint64_t				ifindex; //Kernel ifindex
-	char					name[IFNAMSIZ];
+	//FIXME: This is not updated if an interface name changes.
+	char					_name[IFNAMSIZ];
 
 	gao_resource_state_t 	state;
 	gao_port_type_t			type;
@@ -590,6 +591,8 @@ void		gao_unregister_port(struct net_device *netdev);
 int64_t		gao_register_port(struct net_device *netdev, struct gao_port_ops* if_ops);
 int64_t		gao_activate_port(struct gao_port* port);
 void		gao_deactivate_port(struct gao_port* port);
+
+char*		gao_get_port_name(struct gao_port* port);
 
 uint64_t	gao_ring_slots_left(struct gao_descriptor_ring*);
 uint64_t	gao_ring_num_elements(struct gao_descriptor_ring*);

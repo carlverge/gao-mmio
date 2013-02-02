@@ -22,24 +22,24 @@ const static char *gao_resource_state_str[] = {"Unused", "Registered", "Active",
 //const static char *gao_direction_str[] = {"NA", "RX", "TX"};
 
 
-void	gao_dump_interface(struct gao_port *interface) {
+void	gao_dump_interface(struct gao_port *port) {
 	uint64_t	index;
 	log_debug("Dump Interface: ifindex=%lu kifindex=%lu name=%s state=%s netdev=%p if_ops=%p",
-			(unsigned long)interface->gao_ifindex, (unsigned long)interface->ifindex, interface->name,
-			gao_resource_state_str[interface->state], interface->netdev, interface->port_ops);
+			(unsigned long)port->gao_ifindex, (unsigned long)port->ifindex, gao_get_port_name(port),
+			gao_resource_state_str[port->state], port->netdev, port->port_ops);
 
 	log_debug("RX Queues: num_rx_queues=%u num_rx_desc=%u",
-			(unsigned)interface->num_rx_queues, (unsigned)interface->num_rx_desc);
+			(unsigned)port->num_rx_queues, (unsigned)port->num_rx_desc);
 
-	for(index = 0; index < interface->num_rx_queues; index++) {
-		if(interface->rx_queues[index]) gao_dump_queue(interface->rx_queues[index]);
+	for(index = 0; index < port->num_rx_queues; index++) {
+		if(port->rx_queues[index]) gao_dump_queue(port->rx_queues[index]);
 	}
 
 	log_debug("TX Queues: num_tx_queues=%u num_tx_desc=%u",
-			(unsigned)interface->num_tx_queues, (unsigned)interface->num_tx_desc);
+			(unsigned)port->num_tx_queues, (unsigned)port->num_tx_desc);
 
-	for(index = 0; index < interface->num_tx_queues; index++) {
-		if(interface->tx_queues[index]) gao_dump_queue(interface->tx_queues[index]);
+	for(index = 0; index < port->num_tx_queues; index++) {
+		if(port->tx_queues[index]) gao_dump_queue(port->tx_queues[index]);
 	}
 }
 
@@ -103,7 +103,7 @@ int64_t		gao_register_port(struct net_device *netdev, struct gao_port_ops* if_op
 
 			port->gao_ifindex = index;
 			port->ifindex = netdev->ifindex;
-			strncpy((char*)&port->name, (char*)&netdev->name, IFNAMSIZ);
+			strncpy((char*)&port->_name, (char*)&netdev->name, IFNAMSIZ);
 			port->netdev = netdev;
 			port->port_ops = if_ops;
 			port->state = GAO_RESOURCE_STATE_REGISTERED;
@@ -244,9 +244,9 @@ int64_t		gao_activate_port(struct gao_port* port) {
 	ret = gao_create_port_queues(resources, port);
 	if(ret) goto err;
 
-	port->tx_arbiter_workqueue = alloc_workqueue((char*)&port->name, WQ_HIGHPRI, port->num_tx_queues);
+	port->tx_arbiter_workqueue = alloc_workqueue((char*)gao_get_port_name(port), WQ_HIGHPRI, port->num_tx_queues);
 	if(!port->tx_arbiter_workqueue)
-		gao_error_val(-ENOMEM, "Failed to create TX arbiter workqueue on port %s[%lu].", port->name, (unsigned long)port->gao_ifindex);
+		gao_error_val(-ENOMEM, "Failed to create TX arbiter workqueue on port %s[%lu].", gao_get_port_name(port), (unsigned long)port->gao_ifindex);
 
 	//Start the transmit arbiters
 	for(index = 0; index < port->num_tx_queues; index++) {
@@ -380,7 +380,7 @@ struct gao_request_port_list* gao_get_port_list(struct gao_resources* resources)
 
 		list->port[index].gao_ifindex = port->gao_ifindex;
 		list->port[index].ifindex = port->ifindex;
-		memcpy(&list->port[index].name, &port->name, sizeof(port->name));
+		memcpy(&list->port[index].name, gao_get_port_name(port), IFNAMSIZ);
 		list->port[index].num_rx_queues = port->num_rx_queues;
 		list->port[index].num_tx_queues = port->num_tx_queues;
 	}
@@ -415,7 +415,7 @@ struct gao_request_port_info* gao_get_port_info(struct gao_resources* resources,
 	info->state = port->state;
 	info->gao_ifindex = port->gao_ifindex;
 	info->ifindex = port->ifindex;
-	memcpy(&info->name, &port->name, sizeof(port->name));
+	memcpy(&info->name, gao_get_port_name(port), IFNAMSIZ);
 	info->num_rx_queues = port->num_rx_queues;
 	info->num_tx_queues = port->num_tx_queues;
 
@@ -423,6 +423,14 @@ struct gao_request_port_info* gao_get_port_info(struct gao_resources* resources,
 	return info;
 	err:
 	gao_free_port_info(info);
+	return NULL;
+}
+
+char*		gao_get_port_name(struct gao_port* port) {
+	if(!port) gao_error("Trying to get name of null port.");
+	if(port->netdev) return (char*)&port->netdev->name;
+	else return (char*)&port->_name;
+	err:
 	return NULL;
 }
 

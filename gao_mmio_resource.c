@@ -135,7 +135,7 @@ void	gao_dump_queue_nested(struct gao_queue *queue) {
 
 void	gao_dump_port(struct gao_port* port) {
 	log_debug("Dumping Port %lu: name=%s ifindex=%lu state=%s",
-			(unsigned long)port->gao_ifindex, port->name, (unsigned long)port->ifindex, gao_resource_state_string(port->state));
+			(unsigned long)port->gao_ifindex, gao_get_port_name(port), (unsigned long)port->ifindex, gao_resource_state_string(port->state));
 	log_debug("netdev=%p port_ops=%p", port->netdev, port->port_ops);
 	log_debug("Num Queues/Descriptors: rx=%u/%u tx=%u/%u",
 			(unsigned)port->num_rx_queues, (unsigned)port->num_rx_desc, (unsigned)port->num_tx_queues, (unsigned)port->num_tx_desc);
@@ -885,7 +885,7 @@ void	gao_delete_port_queues(struct gao_resources *resources, struct gao_port *po
 	if(port->tx_arbiter_workqueue) {
 	//FIXME: Clean this up, the queue deletion routines also set the deleting state
 	//But we need to kill the arbiters here...
-		log_debug("Port %s[%lu] arbiter cleanup begins", (char*)&port->name, (unsigned long)port->gao_ifindex);
+		log_debug("Port %s[%lu] arbiter cleanup begins", gao_get_port_name(port), (unsigned long)port->gao_ifindex);
 		for(index = 0; index < port->num_tx_queues; index++) {
 			queue = port->tx_queues[index];
 			if(!queue) continue;
@@ -897,10 +897,10 @@ void	gao_delete_port_queues(struct gao_resources *resources, struct gao_port *po
 			wake_up_interruptible(queue->ring->control.tail_wait_queue_ref);
 		}
 
-		log_debug("Port %s[%lu] draining arbiter workqueue...", (char*)&port->name, (unsigned long)port->gao_ifindex);
+		log_debug("Port %s[%lu] draining arbiter workqueue...", gao_get_port_name(port), (unsigned long)port->gao_ifindex);
 		//This will block until all the tx arbiters have terminated
 		drain_workqueue(port->tx_arbiter_workqueue);
-		log_debug("Port %s[%lu] destroying arbiter workqueue...", (char*)&port->name, (unsigned long)port->gao_ifindex);
+		log_debug("Port %s[%lu] destroying arbiter workqueue...", gao_get_port_name(port), (unsigned long)port->gao_ifindex);
 		destroy_workqueue(port->tx_arbiter_workqueue);
 		port->tx_arbiter_workqueue = NULL;
 	}
