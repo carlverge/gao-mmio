@@ -155,7 +155,9 @@ int gao_mmap(struct file* filep, struct vm_area_struct* vma) {
 
 			log_debug("Mapping: phys=%016lx pfn=%016lx -> vm=%016lx (%s)",
 					group_addr, group_addr >> PAGE_SHIFT, vm_addr, (group_addr==virt_to_phys(resources.dummy_group) ? "dummy":"buffer"));
-			ret = remap_pfn_range(vma, vm_addr, pfn, GAO_BUFFER_GROUP_SIZE, vma->vm_page_prot);
+			//ret = remap_pfn_range(vma, vm_addr, pfn, GAO_BUFFER_GROUP_SIZE, vma->vm_page_prot);
+			//The below call is required instead of the above, otherwise the NVIDIA driver flips its shit when remapping it into GPU space.
+			ret = vm_insert_page(vma, vm_addr, pfn_to_page(pfn));
 			if(ret) gao_error("Failed to MMAP queue page to userspace: %d (offset %lx)", ret, group_offset);
 		}
 

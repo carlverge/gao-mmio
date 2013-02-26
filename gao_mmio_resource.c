@@ -269,7 +269,7 @@ static void* 	gao_alloc_buffer_group(void) {
 	int64_t page_index;
 	void* buffer_group = NULL;
 
-	buffer_group = kmalloc((GAO_BUFFER_GROUP_SIZE), GFP_KERNEL);
+	buffer_group = kmalloc((GAO_BUFFER_GROUP_SIZE), GFP_KERNEL | __GFP_COMP);
 
 	if(!buffer_group) gao_error("Failed to allocate a buffer group.");
 

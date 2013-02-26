@@ -148,7 +148,7 @@ struct gao_descriptor_ring_header {
 #define GAO_DESC_TO_VIRT(DESC)	phys_to_virt(GAO_DESC_TO_PHYS(DESC))
 
 #ifndef __KERNEL__
-#define GAO_DESC_TO_PKT(DESC, OFFSET) (OFFSET + GAO_DESC_TO_PHYS(DESC))
+#define GAO_DESC_TO_PKT(DESC, OFFSET) ((void*)(OFFSET + GAO_DESC_TO_PHYS(DESC)))
 #endif
 
 
