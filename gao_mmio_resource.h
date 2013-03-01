@@ -31,6 +31,7 @@
 
 #else
 #include <stdint.h>
+#include <sys/socket.h>
 #include <net/if.h>
 #endif
 #include "gao_log.h"
@@ -159,27 +160,41 @@ struct gao_descriptor_ring_header {
 #define GAO_QUEUE(BASE, INDEX)		((struct gao_user_queue*)(((uint64_t)BASE) + (INDEX * GAO_MAX_QUEUE_SIZE_BYTES)))
 #endif
 
-
-typedef enum gao_action_id_t {
-	GAO_ACTION_DROP = 0,
-	GAO_ACTION_FORWARD,
-} gao_action_id_t;
-
 #define GAO_INVALID_ACTION_MASK	(~(0x00077F01))
 
-struct 			gao_action {
-	union {
-		struct {
-			uint8_t		action_id;
-			uint8_t		port_id;
-			uint8_t		queue_id;
-			uint8_t		padding;
-		};
-		uint32_t	action;
-	};
 
+struct gao_descriptor_context {
+	uint64_t	resv;
 };
 
+typedef enum gao_action_id {
+	GAO_NEW_ACTION_DROP = 0,
+	GAO_NEW_ACTION_FWD = 1,
+	GAO_NEW_ACTION_MCAST = 2,
+	GAO_NEW_ACTION_SLOWPATH = 3,
+} gao_action_id_t;
+
+struct gao_action {
+	uint8_t		action_id;
+	uint8_t		new_offset;
+	uint16_t	new_len;
+
+	union {
+		struct {
+			uint8_t	 dport;
+			uint8_t	 dqueue;
+			uint16_t resv;
+		}fwd;
+		struct {
+			uint32_t group_id;
+		}mcast;
+		struct {
+			uint32_t resv;
+		}slow;
+	};
+
+	struct gao_descriptor_context desc_ctx;
+};
 
 typedef enum gao_port_type_t {
 	GAO_PORT_PHYSICAL = 0,
@@ -450,7 +465,9 @@ struct gao_resources {
 
 struct gao_context {
 	void*			mmap_addr; //The base address of the mmap area
+	size_t			mmap_size; //The base address of the mmap area
 	unsigned long	offset; //Used for calculating descriptor addresses
+	unsigned long	raw_offset; //Used for calculating descriptor addresses
 	int				fd; //Used for control
 };
 
