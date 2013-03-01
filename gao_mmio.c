@@ -5,7 +5,16 @@
 #undef LINUX
 #define LINUX
 
-#include "gao_mmio.h"
+#include <linux/init.h>
+#include <linux/miscdevice.h>
+#include <linux/fs.h>
+#include <linux/mm.h>
+#include <linux/types.h>
+#include <linux/spinlock.h>
+#include <linux/slab.h>
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include "gao_mmio_resource.h"
 
 
 static struct gao_resources resources;
@@ -369,10 +378,10 @@ static void	gao_forward_frames(struct gao_queue* queue, uint64_t num_to_forward)
 
 		action = &queue->action_pipeline[action_index];
 
-		if(unlikely(action->action & GAO_INVALID_ACTION_MASK)) {
-			log_bug("fwd drop: invalid action=%#08x", action->action);
-			continue;
-		}
+//		if(unlikely(action->action & GAO_INVALID_ACTION_MASK)) {
+//			log_bug("fwd drop: invalid action=%#08x", action->action);
+//			continue;
+//		}
 
 
 		switch(action->action_id) {
@@ -381,8 +390,8 @@ static void	gao_forward_frames(struct gao_queue* queue, uint64_t num_to_forward)
 			log_error("fwd drop: action_id is drop");
 			continue;
 
-		case GAO_ACTION_FORWARD:
-			dest_queue = queue->queue_map.port[action->port_id].ring[action->queue_id];
+		case GAO_ACTION_FWD:
+			dest_queue = queue->queue_map.port[action->fwd.dport].ring[action->fwd.dqueue];
 
 			if(unlikely(!dest_queue)) {
 				log_error("fwd drop: null dest queue");
@@ -398,17 +407,19 @@ static void	gao_forward_frames(struct gao_queue* queue, uint64_t num_to_forward)
 				continue;
 			}
 
+			descriptors[index].offset = action->new_offset;
+			descriptors[index].len = action->new_len;
 
 			swap_descriptors(&descriptors[index], &dest_queue->descriptors[dest_queue->header.tail]);
 			dest_queue->header.tail = CIRC_NEXT(dest_queue->header.tail, dest_queue->header.capacity);
 
 			//Wake the endpoint
-			previous_wake_condition = test_and_set_bit(action->queue_id, (unsigned long*)dest_queue->control.tail_wake_condition_ref);
+			previous_wake_condition = test_and_set_bit(action->fwd.dqueue, (unsigned long*)dest_queue->control.tail_wake_condition_ref);
 
 			log_dp("fwd: action_index=%llu port=%hhu queue=%hhu index=%llu new dest_tail=%llu prev_wake_cond=%llx",
-					action_index, action->port_id, action->queue_id, index, dest_queue->header.tail, previous_wake_condition);
+					action_index, action->fwd.dport, action->fwd.dqueue, index, dest_queue->header.tail, previous_wake_condition);
 
-			if(!(previous_wake_condition & ~(1 << action->queue_id))) {
+			if(!(previous_wake_condition & ~(1 << action->fwd.dqueue))) {
 				wake_up_interruptible(dest_queue->control.tail_wait_queue_ref);
 			}
 
@@ -417,6 +428,7 @@ static void	gao_forward_frames(struct gao_queue* queue, uint64_t num_to_forward)
 			break;
 
 		default:
+			log_bug("fwd drop: invalid action=%#04hhx", action->action_id);
 			break;
 
 		}

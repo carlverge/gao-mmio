@@ -8,8 +8,6 @@
 #define LINUX
 #endif
 
-
-
 #include "gao_mmio_resource.h"
 
 #ifndef CONFIG_HZ

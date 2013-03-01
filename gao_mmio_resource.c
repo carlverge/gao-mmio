@@ -78,7 +78,7 @@ void	gao_dump_descriptor_ring_nested(struct gao_descriptor_ring *ring) {
 }
 
 void	gao_dump_action(struct gao_action *action) {
-	log_debug("Action: id=%hhu port=%hhu queue=%hhu", action->action_id, action->port_id, action->queue_id);
+	log_debug("Action: id=%hhu port=%hhu queue=%hhu", action->action_id, action->fwd.dport, action->fwd.dqueue);
 }
 
 void	gao_dump_resources(struct gao_resources *resources) {

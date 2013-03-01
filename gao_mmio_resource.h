@@ -21,13 +21,11 @@
 #include <linux/types.h>
 #include <linux/workqueue.h>
 #include <linux/circ_buf.h>
-//#include <asm-generic/page.h>
 #include <linux/if.h>
 #include <linux/netdevice.h>
 #include <linux/fcntl.h>
 #include <linux/wait.h>
 #include <linux/rcupdate.h>
-
 
 #else
 #include <stdint.h>
@@ -168,10 +166,10 @@ struct gao_descriptor_context {
 };
 
 typedef enum gao_action_id {
-	GAO_NEW_ACTION_DROP = 0,
-	GAO_NEW_ACTION_FWD = 1,
-	GAO_NEW_ACTION_MCAST = 2,
-	GAO_NEW_ACTION_SLOWPATH = 3,
+	GAO_ACTION_DROP = 0,
+	GAO_ACTION_FWD = 1,
+	GAO_ACTION_MCAST = 2,
+	GAO_ACTION_SLOWPATH = 3,
 } gao_action_id_t;
 
 struct gao_action {
