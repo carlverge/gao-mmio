@@ -18,7 +18,7 @@
 #define GAO_BUFFER_GROUPS 			(64)
 #define GAO_BUFFER_GROUP_SIZE 		(4*1024*1024) 	//4MB
 #define GAO_BUFFER_SIZE				(8192)		//8kB
-#define GAO_DEFAULT_OFFSET			(256)
+#define GAO_DEFAULT_OFFSET			(128)
 #define GAO_READ_WRITE_MEMORY_PROT	0	//Set to 1 to turn on copy_to_user/copy_from_user in read/writes
 
 

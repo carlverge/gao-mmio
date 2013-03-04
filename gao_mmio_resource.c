@@ -753,7 +753,8 @@ static struct gao_queue*	gao_create_queue(struct gao_resources *resources, uint6
 
 		alloc_size = (sizeof(struct gao_action)*num_descriptors*GAO_ING_PIPELINE_DEPTH);
 		alloc_size = (alloc_size % PAGE_SIZE) ? alloc_size + (PAGE_SIZE-(alloc_size%PAGE_SIZE)) : alloc_size;
-		queue->action_pipeline = vmalloc(sizeof(struct gao_action)*num_descriptors*GAO_ING_PIPELINE_DEPTH);
+		//queue->action_pipeline = vmalloc(sizeof(struct gao_action)*num_descriptors*GAO_ING_PIPELINE_DEPTH);
+		queue->action_pipeline = vmalloc(alloc_size);
 		check_ptr(queue->action_pipeline);
 		queue->action_pipeline_size = alloc_size;
 		memset((void*)queue->action_pipeline, 0, alloc_size);

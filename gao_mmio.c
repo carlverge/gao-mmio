@@ -89,6 +89,7 @@ int gao_mmap(struct file* filep, struct vm_area_struct* vma) {
 	struct gao_queue 		*queue = NULL;
 	unsigned long vm_addr, pfn, group_offset, group_addr, base_addr;
 	void*					queue_vm_addr;
+	uint64_t				page_index;
 
 	//uint64_t 	buffer_length = ((uint64_t)GAO_BUFFER_GROUP_SIZE*(uint64_t)GAO_MAX_BUFFER_GROUPS);
 	int ret, index; //XXX: These should probably be int64_t ...
@@ -164,9 +165,12 @@ int gao_mmap(struct file* filep, struct vm_area_struct* vma) {
 
 			log_debug("Mapping: phys=%016lx pfn=%016lx -> vm=%016lx (%s)",
 					group_addr, group_addr >> PAGE_SHIFT, vm_addr, (group_addr==virt_to_phys(resources.dummy_group) ? "dummy":"buffer"));
-			//ret = remap_pfn_range(vma, vm_addr, pfn, GAO_BUFFER_GROUP_SIZE, vma->vm_page_prot);
+//			ret = remap_pfn_range(vma, vm_addr, pfn, GAO_BUFFER_GROUP_SIZE, vma->vm_page_prot);
 			//The below call is required instead of the above, otherwise the NVIDIA driver flips its shit when remapping it into GPU space.
-			ret = vm_insert_page(vma, vm_addr, pfn_to_page(pfn));
+			for(page_index = 0; page_index < (GAO_BUFFER_GROUP_SIZE/GAO_SMALLPAGE_SIZE); page_index++) {
+				ret = vm_insert_page(vma, vm_addr + (page_index*GAO_SMALLPAGE_SIZE), pfn_to_page(pfn+page_index));
+			}
+
 			if(ret) gao_error("Failed to MMAP queue page to userspace: %d (offset %lx)", ret, group_offset);
 		}
 
