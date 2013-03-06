@@ -139,9 +139,9 @@ void gao_e1000_disable_tx_interrupts(struct gao_queue *queue) {
  * @param gao_ring
  */
 void	gao_e1000_init_rx_ring(struct e1000_hw *hw, struct e1000_rx_ring *hw_ring, struct gao_queue *gao_ring) {
-	int64_t 						index;
-	struct e1000_rx_desc	 		*hw_desc;
-	uint64_t						gao_desc;
+	int64_t 				index;
+	struct e1000_rx_desc	*hw_desc;
+	struct gao_descriptor	gao_desc;
 
 
 	log_debug("Initializing E1000E RX Ring:");
@@ -153,7 +153,7 @@ void	gao_e1000_init_rx_ring(struct e1000_hw *hw, struct e1000_rx_ring *hw_ring, 
 	//Set the data on the RX desc.
 	for(index = 0; index < hw_ring->count; index++) {
 		hw_ring->buffer_info[index].skb = NULL;
-		gao_desc = (gao_ring->ring->descriptors[index].descriptor);
+		gao_desc = gao_ring->ring->descriptors[index];
 //		log_debug("Setting RXDESC %ld to phys addr %016lx", (long)index, descriptor_to_phys_addr(gao_desc));
 		hw_desc = E1000_RX_DESC(*hw_ring, index);
 		hw_desc->buffer_addr = cpu_to_le64(descriptor_to_phys_addr(gao_desc));

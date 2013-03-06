@@ -26,6 +26,7 @@
 #include <linux/fcntl.h>
 #include <linux/wait.h>
 #include <linux/rcupdate.h>
+#include <linux/bug.h>
 
 #else
 #include <stdint.h>
@@ -88,69 +89,63 @@ typedef enum gao_queue_request_t {
 
 #define GAO_BUFFER_FILL_VAL			(0xDEADBEEF)
 #define GAO_BUFFER_TEST_STR_LEN		(16)
-#define GAO_BUFFER_TEST_STR_FMT		"GAO:GFN%04hx%04hx"
+#define GAO_BUFFER_TEST_STR_FMT		"GAO:BFN%08x"
 
 
-#define GAO_DESCRIPTOR_LEN(DESCRIPTOR) 		((DESCRIPTOR & 0xFFFF000000000000) >> 48)
-#define GAO_DESCRIPTOR_GFN(DESCRIPTOR) 		((DESCRIPTOR & 0x0000FFFF00000000) >> 32)
-#define GAO_DESCRIPTOR_INDEX(DESCRIPTOR) 	((DESCRIPTOR & 0x00000000FFFF0000) >> 16)
-#define GAO_DESCRIPTOR_OFFSET(DESCRIPTOR) 	((DESCRIPTOR & 0x000000000000FFFF))
-/* +----------------------------------------------------------------+
- * | 63-48			| 32-47			| 31-16			| 15-0			|
- * | len			| gfn			| index			| offset		|
- * +----------------------------------------------------------------+
- * len:			The length of the frame
- * gfn: 		The group frame number of the buffer group (offset in group size aligned phys mem)
- * index:		The index for the buffer within the buffer group
- * offset:		The offset where the frame should begin within the buffer.
- */
-struct	gao_descriptor {
-	union {
-		struct {
-			union {
-				uint16_t				offset;		//Lower 13 bits
-				uint16_t				queue_id; 	//Upper 3 bits
-			};
-			uint16_t				index;
-			uint16_t				gfn;
-			uint16_t				len;
-		};
-		uint64_t descriptor;
-	};
-};
 
+#define GAO_VIRT_TO_BFN(VIRTADDR) 	((unsigned long)((virt_to_phys(VIRTADDR)) >> GAO_BFN_SHIFT))
+#define GAO_BFN_TO_VIRT(BFN)		(phys_to_virt( ((BFN) << GAO_BFN_SHIFT) ))
+#define GAO_PHYS_TO_BFN(PHYSADDR) 	((unsigned long)((PHYSADDR) >> GAO_BFN_SHIFT))
+#define GAO_BFN_TO_PHYS(BFN)	  	((BFN) << GAO_BFN_SHIFT)
 
-struct gao_descriptor_ring_header {
-	union {
-		uint64_t				head;
-		uint64_t				read;
-	};
-	union {
-		uint64_t				tail;
-		uint64_t				write;
-	};
-
-	uint64_t				capacity; //Total space in the queue, regardless of occupancy
-	uint64_t				size; //Total number of occupants
-};
-
-#define GAO_VIRT_TO_GFN(VIRTADDR) 	((unsigned long)((virt_to_phys(VIRTADDR)) >> GAO_GFN_SHIFT))
-#define GAO_GFN_TO_VIRT(GFN)		(phys_to_virt( ((GFN) << GAO_GFN_SHIFT) ))
-#define GAO_PHYS_TO_GFN(PHYSADDR) 	((unsigned long)((PHYSADDR) >> GAO_GFN_SHIFT))
-#define GAO_GFN_TO_PHYS(GFN)	  	((GFN) << GAO_GFN_SHIFT)
-
-#define GAO_DESC_TO_PHYS(DESC) 	((unsigned long)\
-		((GAO_DESCRIPTOR_GFN(DESC) << GAO_GFN_SHIFT) + \
-		(GAO_DESCRIPTOR_INDEX(DESC)*GAO_BUFFER_SIZE) + \
-		GAO_DESCRIPTOR_OFFSET(DESC)))
-
+#define GAO_DESC_TO_PHYS(DESC)	(((unsigned long)DESC.index << (unsigned long)GAO_BFN_SHIFT) + ((unsigned long)DESC.offset))
 #define GAO_DESC_TO_VIRT(DESC)	phys_to_virt(GAO_DESC_TO_PHYS(DESC))
 
 #ifndef __KERNEL__
 #define GAO_DESC_TO_PKT(DESC, OFFSET) ((void*)(OFFSET + GAO_DESC_TO_PHYS(DESC)))
 #endif
 
+/* +---------------------------------------------+
+ * | 63-32			| 31-16		| 15-8	| 7-0	 |
+ * | index			| len		| flags	| offset |
+ * +---------------------------------------------+
+ * index:		The buffer index in physical memory (address = index << log2(buf_size))
+ * len: 		The length of the frame
+ * index:		The index for the buffer within the buffer group
+ * offset:		The offset where the frame should begin within the buffer.
+ */
+struct	gao_descriptor {
+	uint8_t		offset;		//Lower 13 bits
+	uint8_t	 	flags;
+	uint16_t	len;
+	uint32_t	index;
+};
+GAO_STATIC_ASSERT( (sizeof(struct gao_descriptor) == 8), "gao_descriptor size=8");
 
+static inline unsigned long descriptor_to_phys_addr(struct gao_descriptor descriptor) {
+	return GAO_DESC_TO_PHYS(descriptor);
+}
+
+static inline void* descriptor_to_virt_addr(struct gao_descriptor descriptor) {
+	return GAO_DESC_TO_VIRT(descriptor);
+}
+
+
+
+struct gao_descriptor_ring_header {
+	union {
+		uint64_t	head;
+		uint64_t	read;
+	};
+
+	union {
+		uint64_t	tail;
+		uint64_t	write;
+	};
+
+	uint64_t		capacity; //Total space in the queue, regardless of occupancy
+	uint64_t		size; //Total number of occupants
+};
 
 
 
@@ -213,21 +208,7 @@ struct gao_queue_binding {
 };
 
 
-typedef enum gao_queue_attach_t {
-	GAO_QUEUE_ATTACH_NONE 		= (1 << 0),
-	GAO_QUEUE_ATTACH_INTERFACE 	= (1 << 1),
-	GAO_QUEUE_ATTACH_QUEUE_MAP 	= (1 << 2),
-} gao_queue_attach_t;
 
-struct gao_queue_rx_attach {
-	gao_queue_attach_t	type;
-
-
-};
-
-struct gao_queue_tx_attach {
-
-};
 
 struct gao_descriptor_ring_control {
 	/*Writer locking primitives*/
@@ -268,6 +249,8 @@ struct gao_descriptor_ring_control {
 
 
 
+
+
 /**
  * The descriptor rings always have one empty slot at the end
  */
@@ -277,11 +260,21 @@ struct gao_descriptor_ring {
 	//Userspace does see this
 	struct		gao_descriptor_ring_header 	header;
 	struct 		gao_descriptor				descriptors[];
-	//This is really hackish, but the actions go after the descriptors here.
-	//When it gets malloc'd, we malloc enough for the actions, too.
-	//Userspace gets offset values to find each in here.
-	//Basically, actions[0] = descriptors[capacity], likewise last slot is actions[capacity-1]
+	//The contexts are allocated right after the descriptors
+	//Use
+	//struct gao_descriptor_context			contexts[];
 };
+
+/**
+ * Get the address of the gao_descriptor_contexts of the ring
+ * @param ring
+ * @return A pointer to the start of the gao_descriptor_context array.
+ */
+static inline struct gao_descriptor_context* gao_descriptor_ring_ctx(struct gao_descriptor_ring* ring) {
+	return  ((struct gao_descriptor_context*)((void*)ring + (ring->header.capacity*sizeof(struct gao_descriptor))));
+}
+
+
 
 struct gao_egress_subqueue {
 	struct gao_descriptor_ring	*ring;
@@ -296,6 +289,76 @@ struct gao_ingress_port_queue_map {
 struct gao_ingress_queue_map {
 	struct gao_ingress_port_queue_map	port[GAO_MAX_PORTS];
 };
+
+
+
+
+
+struct gao_descriptor_vector {
+	uint32_t	capacity;
+	uint32_t	size;
+	struct gao_descriptor *descriptors;
+	struct gao_descriptor_context *contexts;
+};
+
+
+
+
+
+struct gao_rx_queue {
+	uint64_t					index; //Back-index to the port
+	/* Unused: Queue is free and in an invalid state.
+	 * Registered: Queue has resources allocated, but not connected to an interface.
+	 * Active: Queue has been bound to another resource (file or interface)
+	 * Deleting: Queue is being deleted, will return to unused.
+	 * See GAO Queue Lifecycle diagram for more details.
+	 */
+	gao_resource_state_t	state;
+	uint64_t				flags;
+	uint64_t				descriptors; //Size of descriptor vector
+	void					*hw_private; //Pointer for drivers to store rings/adapter structs for quick access
+	//Must be held during rx/tx, or to delete the queue.
+	spinlock_t				lock;
+
+	//Userspace binding information
+	struct gao_queue_binding 	binding;
+
+	//The next three structs can be mapped to userspace
+	struct gao_descriptor_vector	empty_descriptors;
+	struct gao_descriptor_vector	full_descriptors;
+	struct gao_action				*actions;
+
+	//Contains mapping between port/queue id and destination queue struct.
+	struct gao_ingress_queue_map	queue_map;
+};
+
+
+
+struct gao_tx_queue {
+	uint64_t					index; //Back-index to the port
+	/* Unused: Queue is free and in an invalid state.
+	 * Registered: Queue has resources allocated, but not connected to an interface.
+	 * Active: Queue has been bound to another resource (file or interface)
+	 * Deleting: Queue is being deleted, will return to unused.
+	 * See GAO Queue Lifecycle diagram for more details.
+	 */
+	gao_resource_state_t	state;
+	uint64_t				flags;
+	uint64_t				descriptors; //Size of descriptor vector
+	void					*hw_private; //Pointer for drivers to store rings/adapter structs for quick access
+	//Must be held during rx/tx, or to delete the queue.
+	spinlock_t				lock;
+
+	//Control struct for wake lists
+	struct gao_descriptor_ring_control	control;
+	struct gao_descriptor_vector	empty_descriptors;
+	struct gao_descriptor_vector	full_descriptors;
+
+	//Subqueues this queue can receive on.
+	struct gao_egress_subqueue		subqueues[GAO_MAX_PORT_SUBQUEUE];
+};
+
+
 
 struct gao_queue {
 	uint64_t					index; //Back-index to the main resources array
@@ -396,10 +459,10 @@ struct gao_port {
 	gao_port_qos_mode		qos_mode; //Set by ethernet driver
 	uint32_t				num_rx_queues; //Set by ethernet driver
 	uint32_t				num_rx_desc; //Set by ethernet driver
-	struct gao_queue		*rx_queues[GAO_MAX_PORT_HWQUEUE];
+	struct gao_rx_queue		*rx_queues[GAO_MAX_PORT_HWQUEUE];
 	uint32_t				num_tx_queues; //Set by ethernet driver
 	uint32_t				num_tx_desc; //Set by ethernet driver
-	struct gao_queue		*tx_queues[GAO_MAX_PORT_HWQUEUE];
+	struct gao_tx_queue		*tx_queues[GAO_MAX_PORT_HWQUEUE];
 
 	//Scheduling arbiters attached to HW queues that serialize SW queues to the NIC ring
 	struct workqueue_struct	*tx_arbiter_workqueue;
@@ -409,12 +472,11 @@ struct gao_port {
 
 struct gao_descriptor_allocator_ring {
 	spinlock_t		lock;
-	struct gao_descriptor	(*descriptors)[GAO_DESCRIPTORS];
+	struct gao_descriptor	*descriptors;
 	uint64_t		head; //Pointer to the next descriptor that can be taken
 	uint64_t		tail; //Pointer to the next descriptor that can be freed
 	uint64_t		left; //How many are left
 };
-
 
 struct gao_resources {
 	/*Control*/
@@ -430,11 +492,16 @@ struct gao_resources {
 
 
 	/*Buffers*/
-	void						*buffer_groups[GAO_BUFFER_GROUPS]; //MMAP'd to userspace
-	void						*dummy_group; //Group mmap'd to any gaps in the bufferspace
+	uint8_t						hugepage_mode;
+	void						*hugepages[GAO_HUGEPAGES];
+	void						*buffers[GAO_BUFFERS]; //MMAP'd to userspace
+	void						*dummy_buffer; //Group mmap'd to any gaps in the bufferspace
 	unsigned long				buffer_start_phys; //The first byte of physical space used by buffers
 	unsigned long				buffer_end_phys; //Points to the first byte after the end of the space
 	unsigned long				buffer_space_frame; //The total span of the buffers in physical memory.
+
+
+	/*Descriptor Stack*/
 
 
 	/*Descriptors*/
@@ -597,7 +664,8 @@ void		gao_unlock_file(struct gao_file_private *gao_file);
 int			gao_lock_file(struct gao_file_private *gao_file);
 
 /* Exported functions */
-inline 		unsigned long descriptor_to_phys_addr(uint64_t descriptor);
+inline 		unsigned long 	descriptor_to_phys_addr(struct gao_descriptor descriptor);
+inline 		void* 			descriptor_to_virt_addr(struct gao_descriptor descriptor);
 
 int			gao_lock_resources(struct gao_resources* resources);
 void		gao_unlock_resources(struct gao_resources* resources);
@@ -615,7 +683,7 @@ uint64_t	gao_ring_num_elements(struct gao_descriptor_ring*);
 /* End of kernel-only functions */
 #endif
 
-
-inline void swap_descriptors(struct gao_descriptor *desc1, struct gao_descriptor *desc2);
+//
+//inline void swap_descriptors(struct gao_descriptor *desc1, struct gao_descriptor *desc2);
 
 #endif /* GAO_MMIO_RESOURCE_H_ */

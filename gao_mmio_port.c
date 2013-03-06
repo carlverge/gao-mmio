@@ -189,8 +189,9 @@ static void	gao_priority_scheduler(struct work_struct *work) {
 			rmb();
 
 			for(; sq_limit && frames_this_round; sq_limit--, frames_this_round--) {
-				log_dp("sched sq: ftr=%llu sq_head=%llu sq_limit=%llu index=%llu sq_desc=%016llx desc=%016llx", frames_this_round, sq_head, sq_limit, index, subqueue->descriptors[sq_head].descriptor, descriptors[index].descriptor);
-				swap_descriptors(&subqueue->descriptors[sq_head], &descriptors[index]);
+				//log_dp("sched sq: ftr=%llu sq_head=%llu sq_limit=%llu index=%llu sq_desc=%016llx desc=%016llx", frames_this_round, sq_head, sq_limit, index, subqueue->descriptors[sq_head].descriptor, descriptors[index].descriptor);
+				//swap_descriptors(&subqueue->descriptors[sq_head], &descriptors[index]);
+				descriptors[index] = subqueue->descriptors[sq_head];
 				sq_head = CIRC_NEXT(sq_head, sq_size), index = CIRC_NEXT(index, size);
 			}
 

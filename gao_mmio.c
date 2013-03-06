@@ -35,14 +35,6 @@ inline struct gao_port* gao_get_port_from_ifindex(int ifindex) {
 }
 EXPORT_SYMBOL(gao_get_port_from_ifindex);
 
-inline unsigned long descriptor_to_phys_addr(uint64_t descriptor) {
-	return GAO_DESC_TO_PHYS(descriptor);
-}
-EXPORT_SYMBOL(descriptor_to_phys_addr);
-
-inline void* descriptor_to_virt_addr(uint64_t descriptor) {
-	return GAO_DESC_TO_VIRT(descriptor);
-}
 
 static int gao_open(struct inode *inode, struct file *filep) {
 	int ret = 0;
@@ -82,12 +74,19 @@ static int gao_release(struct inode *inode, struct file *filep) {
 }
 
 
-
+/**
+ * Map either the descriptor queue or the buffer space to userspace.
+ * If the fd has a bound queue, map the queue, otherwise map the bufferspace.
+ * This algorithm is super slow, but only needs to be done once on initialization.
+ * @param filep
+ * @param vma
+ * @return
+ */
 int gao_mmap(struct file* filep, struct vm_area_struct* vma) {
 	uint64_t 	requested_length = vma->vm_end - vma->vm_start;
 	struct gao_file_private	*gao_file = filep->private_data;
 	struct gao_queue 		*queue = NULL;
-	unsigned long vm_addr, pfn, group_offset, group_addr, base_addr;
+	unsigned long vm_addr, pfn, buffer_offset, buffer_addr, base_addr;
 	void*					queue_vm_addr;
 	uint64_t				page_index;
 
@@ -142,36 +141,38 @@ int gao_mmap(struct file* filep, struct vm_area_struct* vma) {
 		}
 
 		//Walk the space frame, and map allocated buffer groups, if unallocated map the dummy frame
-		for(group_offset = 0; group_offset < (resources.buffer_space_frame); group_offset += GAO_BUFFER_GROUP_SIZE) {
+		for(buffer_offset = 0; buffer_offset < (resources.buffer_space_frame); buffer_offset += GAO_BUFFER_SIZE) {
 			//log_debug("Lookup: base_offset=%lx", group_offset);
 
-			//Is that a valid buffer group?
-			for(group_addr = 0, index = 0; index < GAO_BUFFER_GROUPS; index++) {
-				base_addr = (virt_to_phys(resources.buffer_groups[index]) - resources.buffer_start_phys);
-				if( base_addr == group_offset) {
-					group_addr = virt_to_phys(resources.buffer_groups[index]);
+			//Is that a valid buffer group? This really kills performance, but it only needs to be done once.
+			for(buffer_addr = 0, index = 0; index < GAO_BUFFERS; index++) {
+				base_addr = (virt_to_phys(resources.buffers[index]) - resources.buffer_start_phys);
+				if(base_addr == buffer_offset) {
+					buffer_addr = virt_to_phys(resources.buffers[index]);
 					//log_debug("Found buffer group at index %d, phys=%lx, base=%lx", index, (unsigned long)virt_to_phys(resources.buffer_groups[index]), base_addr);
 					break;
 				}
 			}
 
 			//Nope, map the dummy group
-			if(!group_addr) {
-				group_addr = virt_to_phys(resources.dummy_group);
+			if(!buffer_addr) {
+				buffer_addr = virt_to_phys(resources.dummy_buffer);
 			}
 
-			vm_addr = vma->vm_start + (group_offset);
-			pfn = group_addr >> PAGE_SHIFT;
+			vm_addr = vma->vm_start + (buffer_offset);
+			pfn = buffer_addr >> PAGE_SHIFT;
 
-			log_debug("Mapping: phys=%016lx pfn=%016lx -> vm=%016lx (%s)",
-					group_addr, group_addr >> PAGE_SHIFT, vm_addr, (group_addr==virt_to_phys(resources.dummy_group) ? "dummy":"buffer"));
+//			if (buffer_addr!=virt_to_phys(resources.dummy_buffer)) {
+//			log_debug("Mapping: phys=%016lx pfn=%016lx -> vm=%016lx (%s)",
+//					buffer_addr, buffer_addr >> PAGE_SHIFT, vm_addr, (buffer_addr==virt_to_phys(resources.dummy_buffer) ? "dummy":"buffer"));
+//			}
 //			ret = remap_pfn_range(vma, vm_addr, pfn, GAO_BUFFER_GROUP_SIZE, vma->vm_page_prot);
 			//The below call is required instead of the above, otherwise the NVIDIA driver flips its shit when remapping it into GPU space.
-			for(page_index = 0; page_index < (GAO_BUFFER_GROUP_SIZE/GAO_SMALLPAGE_SIZE); page_index++) {
+			for(page_index = 0; page_index < GAO_PAGE_PER_BUFFER; page_index++) {
 				ret = vm_insert_page(vma, vm_addr + (page_index*GAO_SMALLPAGE_SIZE), pfn_to_page(pfn+page_index));
 			}
 
-			if(ret) gao_error("Failed to MMAP queue page to userspace: %d (offset %lx)", ret, group_offset);
+			if(ret) gao_error("Failed to MMAP queue page to userspace: %d (offset %lx)", ret, buffer_offset);
 		}
 
 
@@ -414,7 +415,8 @@ static void	gao_forward_frames(struct gao_queue* queue, uint64_t num_to_forward)
 			descriptors[index].offset = action->new_offset;
 			descriptors[index].len = action->new_len;
 
-			swap_descriptors(&descriptors[index], &dest_queue->descriptors[dest_queue->header.tail]);
+			//swap_descriptors(&descriptors[index], &dest_queue->descriptors[dest_queue->header.tail]);
+			dest_queue->descriptors[dest_queue->header.tail] = descriptors[index];
 			dest_queue->header.tail = CIRC_NEXT(dest_queue->header.tail, dest_queue->header.capacity);
 
 			//Wake the endpoint
@@ -654,7 +656,7 @@ ssize_t gao_read(struct file *filep, char __user *packet_buf, size_t packet_size
 
 	//There are packets waiting
 	packet_length = descriptors[header->tail].len;
-	ret = copy_to_user( (void*)packet_buf, descriptor_to_virt_addr(descriptors[header->tail].descriptor), packet_length );
+	ret = copy_to_user( (void*)packet_buf, descriptor_to_virt_addr(descriptors[header->tail]), packet_length );
 
 	header->tail = CIRC_NEXT(header->tail, size);
 
@@ -772,7 +774,6 @@ static void __exit gao_mmio_exit(void)
 	gao_free_resources(&resources);
 	misc_deregister(&gao_miscdev);
 
-
 	log_info("Removing GAOMMIO.");
     return;
 }
@@ -795,8 +796,7 @@ static int __init gao_mmio_init(void) {
 
     return 0;
     err:
-    gao_mmio_exit();
-    return ret;
+    return -1;
 }
 
 module_init(gao_mmio_init);

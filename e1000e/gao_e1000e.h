@@ -95,7 +95,7 @@ bool gao_e1000e_clean_rx_irq(struct e1000_ring *rx_ring, int *work_done, int wor
 void	gao_e1000e_init_rx_ring(struct e1000_ring *hw_ring, struct gao_queue *gao_ring) {
 	int64_t 						index;
 	union e1000_rx_desc_extended 	*hw_desc;
-	uint64_t						gao_desc;
+	struct gao_descriptor			gao_desc;
 
 	log_debug("Initializing E1000E RX Ring:");
 	log_debug("RX Ring Head=%u Tail=%u", readl(hw_ring->head), readl(hw_ring->tail));
@@ -106,7 +106,7 @@ void	gao_e1000e_init_rx_ring(struct e1000_ring *hw_ring, struct gao_queue *gao_r
 	//Set the data on the RX desc.
 	for(index = 0; index < hw_ring->count; index++) {
 		hw_ring->buffer_info[index].skb = NULL;
-		gao_desc = (gao_ring->ring->descriptors[index].descriptor);
+		gao_desc = gao_ring->ring->descriptors[index];
 //		log_debug("Setting RXDESC %ld to phys addr %016lx", (long)index, descriptor_to_phys_addr(gao_desc));
 		hw_desc = E1000_RX_DESC_EXT(*hw_ring, index);
 		hw_desc->read.buffer_addr = cpu_to_le64(descriptor_to_phys_addr(gao_desc));
@@ -582,8 +582,8 @@ ssize_t		gao_e1000e_read(struct gao_file_private *file_priv, size_t num_to_read)
 		hw_desc = E1000_RX_DESC_EXT(*hw_ring, index);
 		staterr = le32_to_cpu(hw_desc->wb.upper.status_error);
 
-		log_dp("Checking Desc: GFN=%hx Idx=%hx Len=%hu Staterr=%08x",
-				(*gao_descriptors)[index].gfn, (*gao_descriptors)[index].index, (*gao_descriptors)[index].len,
+		log_dp("Checking Desc: Idx=%x Len=%hu Staterr=%08x",
+				(*gao_descriptors)[index].index, (*gao_descriptors)[index].len,
 				staterr);
 
 		if(!(staterr & E1000_RXD_STAT_DD)) {
@@ -659,7 +659,7 @@ ssize_t		gao_e1000e_write(struct gao_file_private *file_priv, size_t num_to_clea
 
 	for(; (index != head) && left_to_clean; index = CIRC_NEXT(index, size), left_to_clean--) {
 		hw_desc = E1000_RX_DESC_EXT(*hw_ring, index);
-		hw_desc->read.buffer_addr = cpu_to_le64(descriptor_to_phys_addr((*gao_descriptors)[index].descriptor));
+		hw_desc->read.buffer_addr = cpu_to_le64(descriptor_to_phys_addr((*gao_descriptors)[index]));
 		log_dp("Cleaning: index=%lu addr=%lx", (unsigned long)index, (unsigned long)hw_desc->read.buffer_addr);
 	}
 
@@ -928,7 +928,7 @@ ssize_t	gao_e1000e_clean(struct gao_queue *gao_queue, size_t num_to_clean) {
 	while( (index != head) && num_to_clean ) {
 		hw_desc = E1000_RX_DESC_EXT(*hw_ring, index);
 		gao_descriptors[index].offset = GAO_DEFAULT_OFFSET;
-		hw_desc->read.buffer_addr = cpu_to_le64(descriptor_to_phys_addr(gao_descriptors[index].descriptor));
+		hw_desc->read.buffer_addr = cpu_to_le64(descriptor_to_phys_addr(gao_descriptors[index]));
 
 		log_dp("clean: index=%llu addr=%llx", index, hw_desc->read.buffer_addr);
 
@@ -1022,8 +1022,9 @@ ssize_t	gao_e1000e_xmit(struct gao_queue *gao_queue) {
 
 	for(; index != limit; index = CIRC_NEXT(index, size) ) {
 		hw_desc = E1000_TX_DESC(*hw_ring, index);
-		log_dp("xmit: index=%llu desc=%016llx", index, gao_descriptors[index].descriptor);
-		hw_desc->buffer_addr = cpu_to_le64(descriptor_to_phys_addr(gao_descriptors[index].descriptor));
+		log_dp("xmit: index=%llu desc idx=%08x len=%04x ofs=%02x", index, gao_descriptors[index].index
+				, gao_descriptors[index].len, gao_descriptors[index].offset);
+		hw_desc->buffer_addr = cpu_to_le64(descriptor_to_phys_addr(gao_descriptors[index]));
 		hw_desc->lower.data  = cpu_to_le32(gao_descriptors[index].len | GAO_E1000E_TXD_FLAGS);
 		hw_desc->upper.data  = 0;
 	}

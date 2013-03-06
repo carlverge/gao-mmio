@@ -8,46 +8,53 @@
 #ifndef GAO_MMIO_CONSTANTS_H_
 #define GAO_MMIO_CONSTANTS_H_
 
-//Memory
+//Assert that the condition is true
+#define GAO_STATIC_ASSERT(cond, msg)	_Static_assert(cond, msg)
+//Make sure that the bitfield is the log2 of the parent value
+#define GAO_ASSERT_LOG2(bitval, decval)	GAO_STATIC_ASSERT( ((1 << bitval) == decval), #bitval" is not the log2 of "#decval)
+//Make sure the value is a power of 2
+#define GAO_ASSERT_POW2(val)	GAO_STATIC_ASSERT( ((val > 1) & !(val & (val - 1))) , #val" is not a power of 2")
+
+
+
+
+/*Memory*/
+#define GAO_SMALLPAGE_SIZE 			4096
+#define GAO_SMALLPAGE_PFN_SHIFT		12
+GAO_ASSERT_POW2(GAO_SMALLPAGE_SIZE);
+GAO_ASSERT_LOG2(GAO_SMALLPAGE_PFN_SHIFT, GAO_SMALLPAGE_SIZE);
+//We will try to allocate in larger memory chunks if possible
 #define GAO_HUGEPAGE_SIZE 			(2*1024*1024)
-#define GAO_SMALLPAGE_SIZE 			(4096)
-
-//Buffers
-
-//Configurable
-#define GAO_BUFFER_GROUPS 			(64)
-#define GAO_BUFFER_GROUP_SIZE 		(4*1024*1024) 	//4MB
-#define GAO_BUFFER_SIZE				(8192)		//8kB
-#define GAO_DEFAULT_OFFSET			(128)
-#define GAO_READ_WRITE_MEMORY_PROT	0	//Set to 1 to turn on copy_to_user/copy_from_user in read/writes
+#define GAO_HUGEPAGE_PFN_SHIFT		21
+GAO_ASSERT_POW2(GAO_HUGEPAGE_SIZE);
+GAO_ASSERT_LOG2(GAO_HUGEPAGE_PFN_SHIFT, GAO_HUGEPAGE_SIZE);
 
 
-//Non-Configurable
-#define GAO_BUFFER_SPACE_SIZE		(GAO_BUFFER_GROUPS*GAO_BUFFER_GROUP_SIZE)
-#define GAO_BUFFERS_PER_GROUP		(GAO_BUFFER_GROUP_SIZE/GAO_BUFFER_SIZE)
-#define GAO_BUFFERS					(GAO_BUFFERS_PER_GROUP*GAO_BUFFER_GROUPS)
+/*Buffers*/
+#define GAO_BUFFERS			(131072/4)
+GAO_ASSERT_POW2(GAO_BUFFERS);
+#define GAO_BUFFER_SIZE		8192
+GAO_ASSERT_POW2(GAO_BUFFER_SIZE);
+GAO_STATIC_ASSERT((GAO_BUFFER_SIZE >= GAO_SMALLPAGE_SIZE), "GAO_BUFFER_SIZE is not at least GAO_SMALLPAGE_SIZE");
+#define GAO_BFN_MASK		((unsigned long)(GAO_BUFFER_SIZE-1))
+#define GAO_BFN_SHIFT 		13
+GAO_ASSERT_LOG2(GAO_BFN_SHIFT, GAO_BUFFER_SIZE);
+#define GAO_DEFAULT_OFFSET	128
+GAO_STATIC_ASSERT(GAO_DEFAULT_OFFSET >= 0 && GAO_DEFAULT_OFFSET <= 255, "GAO_BUFFER_SIZE is not at least GAO_SMALLPAGE_SIZE");
+#define GAO_PAGE_PER_BUFFER	(GAO_BUFFER_SIZE/GAO_SMALLPAGE_SIZE)
+#define GAO_HUGEPAGES		((GAO_BUFFER_SIZE*GAO_BUFFERS)/GAO_HUGEPAGE_SIZE)
+#define GAO_BUFFER_PER_HUGEPAGE	(GAO_HUGEPAGE_SIZE/GAO_BUFFER_SIZE)
+GAO_STATIC_ASSERT( ((GAO_BUFFERS*GAO_BUFFER_SIZE) % GAO_HUGEPAGE_SIZE) == 0,
+		"Bufferspace must be larger than a single hugepage" );
+GAO_STATIC_ASSERT( (GAO_BUFFERS*GAO_BUFFER_SIZE) >= GAO_HUGEPAGE_SIZE,
+		"Bufferspace must be evenly divisible by a hugepage" );
 
-#define GAO_GFN_SHIFT				22				//log2(GAO_BUFFER_GROUP_SIZE)
-#define GAO_GFN_MASK				0x00000000003FFFFF //GAO_BUFFER_GFN_SHIFT right most bits set
-#define GAO_PAGES_PER_GROUP 		(GAO_BUFFER_GROUP_SIZE/GAO_SMALLPAGE_SIZE)
 
-
-#define GAO_DESCRIPTORS				GAO_BUFFERS
-
-
-//OLD
-#define GAO_MAX_BUFFER_GROUPS 		(2)			//1GB
-#define GAO_BUFFER_GROUP_ORDER 		9			//2^9 = 2MB (of 4kB pages)
-
+/*Descriptors*/
+#define GAO_DESCRIPTORS		GAO_BUFFERS
 
 
 
-
-//Descriptors
-#define GAO_MAX_DESCRIPTORS			(GAO_BUFFERS_PER_GROUP*GAO_MAX_BUFFER_GROUPS)
-#define GAO_MAX_DESCRIPTOR_GROUPS	64
-#define GAO_DESCRIPTORS_PER_GROUP	(GAO_MAX_DESCRIPTORS/GAO_MAX_DESCRIPTOR_GROUPS)
-#define GAO_DESCRIPTOR_SIZE			8
 
 //Queues
 #define GAO_MAX_QUEUES				128
@@ -67,6 +74,8 @@
 #define GAO_MAX_PORT_SUBQUEUE		8
 #define GAO_MAX_IFINDEX				256
 #define IFF_GAO_ENABLED				0x400000
+
+
 
 
 //Circular buffer branchless calculations

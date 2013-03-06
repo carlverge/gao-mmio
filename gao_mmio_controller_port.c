@@ -189,10 +189,10 @@ int64_t	gao_controller_register_port(struct gao_resources *resources) {
 
 
 	//Initialize the queue with all the descriptors already available so userspace can copy into them right away
-	ring_descriptors = (struct gao_descriptor*)&port->rx_queues[0]->ring->descriptors;
-	mmap_descriptors = port->rx_queues[0]->descriptor_pipeline;
+	ring_descriptors = (struct gao_descriptor*)port->rx_queues[0]->full_descriptors.descriptors;
+	mmap_descriptors = port->rx_queues[0]->full_descriptors.descriptors;
 	for(index = 0; index < GAO_CONTROLLER_BUFFERS; index++) {
-		mmap_descriptors[index].descriptor = ring_descriptors[index].descriptor;
+		mmap_descriptors[index] = ring_descriptors[index];
 	}
 
 	//Use a ring header to store next_to_use/clean values.
