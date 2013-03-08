@@ -8,6 +8,7 @@
 #define LINUX
 #endif
 
+#include <linux/delay.h>
 #include "gao_mmio_resource.h"
 
 
@@ -148,12 +149,12 @@ void gao_dump_port_nested(struct gao_port* port) {
 	log_debug("RX Queues:");
 	for(index = 0; index < port->num_rx_queues; index++) {
 		if(!port->rx_queues[index]) continue;
-		gao_dump_queue(port->rx_queues[index]);
+		//gao_dump_queue(port->rx_queues[index]);
 	}
 
 	for(index = 0; index < port->num_tx_queues; index++) {
 		if(!port->tx_queues[index]) continue;
-		gao_dump_queue(port->tx_queues[index]);
+		//gao_dump_queue(port->tx_queues[index]);
 	}
 
 }
@@ -600,96 +601,7 @@ static int64_t	gao_init_descriptor_allocator_ring(struct gao_resources *resource
 	return ret;
 }
 
-inline static void gao_lock_descriptor_allocator(struct gao_descriptor_allocator_ring *ring) {
-	log_debug("Spinlocking descriptor ring");
-	spin_lock(&ring->lock);
-	log_debug("Locked descriptor ring");
-}
 
-inline static void gao_unlock_descriptor_ring(struct gao_descriptor_allocator_ring *ring) {
-	log_debug("Unlocking descriptor ring");
-	spin_unlock(&ring->lock);
-}
-
-
-/**
- * Return descriptors to the global ring. Must always succeed.
- * @warning Spinlocks the descriptor ring
- * @param source_queue A pointer to an array of descriptors to take from
- * @param num_descriptors The number of descriptors to take
- */
-static void gao_free_descriptors(struct gao_descriptor *source_queue, uint64_t num_descriptors) {
-	int64_t index;
-	struct gao_descriptor_allocator_ring *ring = &gao_get_resources()->descriptor_ring;
-	uint64_t tail = ring->tail;
-
-	log_debug("Trying to free %lu descriptors for %p",
-			(unsigned long)num_descriptors, source_queue);
-
-	gao_lock_descriptor_allocator(ring);
-
-	if(unlikely(num_descriptors > (GAO_DESCRIPTORS - ring->left))) {
-		log_bug("Trying to free more descriptors than we should have... (Freeing: %lu Need: %lu)",
-				(unsigned long)num_descriptors, (unsigned long)(GAO_DESCRIPTORS - ring->left));
-		//Truncate the free and return what we have space for
-		//XXX: Better to crash here?
-		num_descriptors = (GAO_DESCRIPTORS - ring->left);
-	}
-
-	//Copy the descriptors into the queue
-	for(index = 0; index < num_descriptors; index++, tail = CIRC_NEXT(tail, GAO_DESCRIPTORS)) {
-		ring->descriptors[tail] = source_queue[index];
-#if GAO_LOG_LEVEL >= LOG_LEVEL_DEBUG
-		//TODO: More robust error handling here
-		source_queue[index].index = 0;
-		if(!ring->descriptors[tail].index) log_bug("Copied a zero descriptor into the ring!");
-#endif
-	}
-
-	ring->tail = tail;
-	ring->left += num_descriptors;
-
-
-	gao_unlock_descriptor_ring(ring);
-	return;
-}
-
-
-/**
- * Copy descriptors from the ring into the targeted queue. Copies them starting at
- * index num_descriptors going backwards.
- * @warning Spinlocks the descriptor ring
- * @param target_queue The descriptor buffer to copy into
- * @param num_descriptors The numbre of descriptors to take
- * @return 0 on success, -ENOMEM on failure. On failure, allocates no descriptors.
- */
-static int64_t gao_get_descriptors(struct gao_descriptor *target_queue, uint64_t num_descriptors) {
-	int64_t ret = 0, index;
-	struct gao_descriptor_allocator_ring *ring = &gao_get_resources()->descriptor_ring;
-	uint64_t head = ring->head;
-
-	log_debug("Trying to get %lu descriptors for %p",
-			(unsigned long)num_descriptors, target_queue);
-
-	gao_lock_descriptor_allocator(ring);
-
-	if(unlikely(num_descriptors > ring->left)) {
-		gao_error_val(-ENOMEM, "Cannot allocate queue, insufficient descriptors. (Want: %lu have: %lu)", (unsigned long)num_descriptors, (unsigned long)ring->left);
-	}
-
-	ring->left -= num_descriptors;
-
-	//Copy the descriptors into the queue
-	for(index = 0; index < num_descriptors; index++, head = CIRC_NEXT(head, GAO_DESCRIPTORS))
-		target_queue[index] = ring->descriptors[head];
-
-	ring->head = head;
-
-	return 0;
-	err:
-	gao_unlock_descriptor_ring(ring);
-	return ret;
-}
 
 
 inline static void	gao_free_descriptor_ring(struct gao_resources *resources, struct gao_descriptor_ring *ring) {
@@ -698,9 +610,6 @@ inline static void	gao_free_descriptor_ring(struct gao_resources *resources, str
 		log_debug("Trying to free null descriptor ring.");
 		return;
 	}
-
-//	if(ring->header.capacity)
-//		gao_free_descriptors(resources, &ring->descriptors, ring->header.capacity);
 
 	vfree(ring);
 
@@ -802,74 +711,31 @@ static int64_t	gao_create_egress_subqueue(struct gao_resources *resources, struc
 
 
 
-/**
- * Delete a queue from its index. Will return descriptor groups, but does not unbind it.
- * @warning Caller must hold resource lock.
- * @warning Caller must have synchronized_rcu
- * @param resources
- * @param queue_index
- */
-//static void	gao_free_queue(struct gao_resources *resources, struct gao_queue *queue) {
-//	size_t	alloc_size;
-//	void	*pipeline_addr;
-//	log_debug("Deleting queue at %p", queue);
-//
-//	if(!queue) return;
-//
-//	gao_free_egress_subqueues(resources, queue);
-//	gao_free_descriptor_ring(resources, queue->ring);
-//
-//	if(queue->action_map) vfree(queue->action_map);
-//
-//	if(queue->descriptor_pipeline) {
-//		pipeline_addr = queue->descriptor_pipeline;
-//		alloc_size = queue->descriptor_pipeline_size;
-//		for(pipeline_addr = queue->descriptor_pipeline; pipeline_addr < ((void*)queue->descriptor_pipeline) + alloc_size; pipeline_addr += PAGE_SIZE) {
-//			ClearPageReserved(vmalloc_to_page(pipeline_addr));
-//		}
-//
-//		vfree(queue->descriptor_pipeline);
-//	}
-//
-//	if(queue->action_pipeline) {
-//		pipeline_addr = queue->action_pipeline;
-//		alloc_size = queue->action_pipeline_size;
-//		for(pipeline_addr = queue->action_pipeline; pipeline_addr < ((void*)queue->action_pipeline) + alloc_size; pipeline_addr += PAGE_SIZE) {
-//			ClearPageReserved(vmalloc_to_page(pipeline_addr));
-//		}
-//
-//		vfree(queue->action_pipeline);
-//	}
-//
-//
-//	vfree(queue);
-//
-//	return;
-//}
 
 
-
-static void	gao_dtor_descriptor_vector(struct gao_descriptor_vector* vector) {
+static void	gao_dtor_descriptor_list(struct gao_resources *resources, struct gao_descriptor_list* list) {
 	void*	page_addr;
 	size_t	alloc_size = 0;
-	if(!vector) return;
+	if(!list) return;
 
-	if(vector->descriptors) {
-		alloc_size = (sizeof(struct gao_descriptor)*vector->capacity);
-		alloc_size = (alloc_size % PAGE_SIZE) ? alloc_size + (PAGE_SIZE-(alloc_size%PAGE_SIZE)) : alloc_size;
-		for(page_addr = vector->descriptors; page_addr < ((void*)vector->descriptors) + alloc_size; page_addr += PAGE_SIZE) {
+	if(list->descriptors) {
+
+		if(list->count)
+			gao_return_descriptors(&resources->descriptor_ring, list);
+
+		alloc_size = GAO_PAGEALIGN((sizeof(struct gao_descriptor)*list->capacity));
+		for(page_addr = list->descriptors; page_addr < ((void*)list->descriptors) + alloc_size; page_addr += PAGE_SIZE) {
 			ClearPageReserved(vmalloc_to_page(page_addr));
 		}
-		vfree(vector->descriptors);
+		vfree(list->descriptors);
 	}
 
-	if(vector->contexts) {
-		alloc_size = (sizeof(struct gao_descriptor_context)*vector->capacity);
-		alloc_size = (alloc_size % PAGE_SIZE) ? alloc_size + (PAGE_SIZE-(alloc_size%PAGE_SIZE)) : alloc_size;
-		for(page_addr = vector->contexts; page_addr < ((void*)vector->contexts) + alloc_size; page_addr += PAGE_SIZE) {
+	if(list->contexts) {
+		alloc_size = GAO_PAGEALIGN((sizeof(struct gao_descriptor_context)*list->capacity));
+		for(page_addr = list->contexts; page_addr < ((void*)list->contexts) + alloc_size; page_addr += PAGE_SIZE) {
 			ClearPageReserved(vmalloc_to_page(page_addr));
 		}
-		vfree(vector->contexts);
+		vfree(list->contexts);
 	}
 }
 
@@ -880,43 +746,41 @@ static void	gao_dtor_descriptor_vector(struct gao_descriptor_vector* vector) {
  * @param capacity The size in descriptors of the vector.
  * @return Returns 0 on success, -ENOMEM on failure.
  */
-static int64_t	gao_init_descriptor_vector(struct gao_descriptor_vector* vector, uint32_t capacity) {
-	int64_t ret = 0;
+static int64_t	gao_init_descriptor_list(struct gao_resources *resources, struct gao_descriptor_list* list, uint32_t capacity) {
 	size_t	alloc_size = 0;
 	void*	page_addr;
 
-	if(!vector) gao_error("Null vector, cannot init.");
+	if(!list) gao_error("Null list, cannot init.");
 
-	vector->capacity = capacity;
-	vector->size = 0;
-	vector->descriptors = NULL;
-	vector->contexts = NULL;
+	list->capacity = capacity;
+	list->watermark = capacity;
+	list->count = 0;
+	list->descriptors = NULL;
+	list->contexts = NULL;
 
-	alloc_size = (sizeof(struct gao_descriptor)*capacity);
-	alloc_size = (alloc_size % PAGE_SIZE) ? alloc_size + (PAGE_SIZE-(alloc_size%PAGE_SIZE)) : alloc_size;
-	vector->descriptors = vmalloc(alloc_size);
-	check_ptr(vector->descriptors);
-	memset((void*)vector->descriptors, 0, alloc_size);
-	log_debug("Allocated vector descriptors size %lu B at %p", alloc_size, vector->descriptors);
+	alloc_size = GAO_PAGEALIGN((sizeof(struct gao_descriptor)*capacity));
+	list->descriptors = vmalloc(alloc_size);
+	check_ptr(list->descriptors);
+	memset((void*)list->descriptors, 0, alloc_size);
+	log_debug("Allocated list descriptors size %lu B at %p", alloc_size, list->descriptors);
 
-	for(page_addr = vector->descriptors; page_addr < ((void*)vector->descriptors) + alloc_size; page_addr += PAGE_SIZE) {
+	for(page_addr = list->descriptors; page_addr < ((void*)list->descriptors) + alloc_size; page_addr += PAGE_SIZE) {
 		SetPageReserved(vmalloc_to_page(page_addr));
 	}
 
-	alloc_size = (sizeof(struct gao_descriptor_context)*capacity);
-	alloc_size = (alloc_size % PAGE_SIZE) ? alloc_size + (PAGE_SIZE-(alloc_size%PAGE_SIZE)) : alloc_size;
-	vector->contexts = vmalloc(alloc_size);
-	check_ptr(vector->contexts);
-	memset((void*)vector->contexts, 0, alloc_size);
-	log_debug("Allocated vector contexts size %lu B at %p", alloc_size, vector->contexts);
+	alloc_size = GAO_PAGEALIGN((sizeof(struct gao_descriptor_context)*capacity));
+	list->contexts = vmalloc(alloc_size);
+	check_ptr(list->contexts);
+	memset((void*)list->contexts, 0, alloc_size);
+	log_debug("Allocated list contexts size %lu B at %p", alloc_size, list->contexts);
 
-	for(page_addr = vector->contexts; page_addr < ((void*)vector->contexts) + alloc_size; page_addr += PAGE_SIZE) {
+	for(page_addr = list->contexts; page_addr < ((void*)list->contexts) + alloc_size; page_addr += PAGE_SIZE) {
 		SetPageReserved(vmalloc_to_page(page_addr));
 	}
 
-
+	return 0;
 	err:
-	gao_dtor_descriptor_vector(vector);
+	gao_dtor_descriptor_list(resources, list);
 	return -ENOMEM;
 }
 
@@ -928,12 +792,13 @@ static void gao_free_rx_queue(struct gao_resources *resources, struct gao_rx_que
 
 	if(!queue) return;
 
-	gao_dtor_descriptor_vector(&queue->full_descriptors);
-	gao_dtor_descriptor_vector(&queue->empty_descriptors);
+	if(queue->shadow_ring) kfree(queue->shadow_ring);
+
+	gao_dtor_descriptor_list(resources, &queue->full_descriptors);
+	gao_dtor_descriptor_list(resources, &queue->empty_descriptors);
 
 	if(queue->actions) {
-		alloc_size = (sizeof(struct gao_action)*queue->descriptors);
-		alloc_size = (alloc_size % PAGE_SIZE) ? alloc_size + (PAGE_SIZE-(alloc_size%PAGE_SIZE)) : alloc_size;
+		alloc_size = GAO_PAGEALIGN((sizeof(struct gao_action)*queue->descriptors));
 		for(page_addr = queue->actions; page_addr < ((void*)queue->actions) + alloc_size; page_addr += PAGE_SIZE) {
 			ClearPageReserved(vmalloc_to_page(page_addr));
 		}
@@ -944,7 +809,14 @@ static void gao_free_rx_queue(struct gao_resources *resources, struct gao_rx_que
 	return;
 }
 
-
+/**
+ * Allocate and initializa a new RX queue. The descriptor memory is reserved for memory
+ * mapping, and the empty descriptor list is pre-populated with descriptors. The number of
+ * descriptors must be a power of 2. NIC specific initialization will still need to be done.
+ * @param resources
+ * @param num_descriptors
+ * @return NULL on failure, otherwise a pointer to a new RX queue.
+ */
 static struct gao_rx_queue* gao_create_rx_queue(struct gao_resources *resources, uint64_t num_descriptors) {
 	struct gao_rx_queue* 	queue = NULL;
 	size_t					alloc_size = 0;
@@ -958,15 +830,26 @@ static struct gao_rx_queue* gao_create_rx_queue(struct gao_resources *resources,
 
 	queue->descriptors = num_descriptors;
 	spin_lock_init(&queue->lock);
+	init_waitqueue_head(&queue->wait_queue);
 
-	if(gao_init_descriptor_vector(&queue->full_descriptors, num_descriptors))
+	queue->shadow_ring = kmalloc(sizeof(struct gao_descriptor)*num_descriptors, GFP_KERNEL);
+	check_ptr(queue->shadow_ring);
+
+	if(gao_init_descriptor_list(resources, &queue->full_descriptors, num_descriptors*2))
 		gao_error("Failed to init full descriptors vector");
-	if(gao_init_descriptor_vector(&queue->empty_descriptors, num_descriptors))
+	if(gao_init_descriptor_list(resources, &queue->empty_descriptors, num_descriptors*4))
 		gao_error("Failed to init empty descriptors vector");
 
+	//Set to half the capacity, we need to be able to accept dropped full descriptors after a refill.
+	queue->empty_descriptors.watermark = num_descriptors*2;
+	//Do an initial fill of the empty descriptors
+	alloc_size = gao_refill_descriptors(&resources->descriptor_ring, &queue->empty_descriptors);
+	if(alloc_size != queue->empty_descriptors.watermark)
+		gao_error("Failed populate empty descriptors (needed=%u got=%ld)", queue->empty_descriptors.watermark, alloc_size);
+
+
 	//Allocate actions for mmaping to userspace
-	alloc_size = (sizeof(struct gao_action)*num_descriptors);
-	alloc_size = (alloc_size % PAGE_SIZE) ? alloc_size + (PAGE_SIZE-(alloc_size%PAGE_SIZE)) : alloc_size;
+	alloc_size = GAO_PAGEALIGN((sizeof(struct gao_action)*queue->full_descriptors.capacity));
 	queue->actions = vmalloc(alloc_size);
 	check_ptr(queue->actions);
 	memset((void*)queue->actions, 0, alloc_size);
@@ -976,6 +859,9 @@ static struct gao_rx_queue* gao_create_rx_queue(struct gao_resources *resources,
 		SetPageReserved(vmalloc_to_page(page_addr));
 	}
 
+	queue->descriptor_size = GAO_PAGEALIGN((sizeof(struct gao_descriptor)*queue->full_descriptors.capacity));
+	queue->descriptor_ctx_size = GAO_PAGEALIGN((sizeof(struct gao_descriptor_context)*queue->full_descriptors.capacity));
+	queue->action_size = GAO_PAGEALIGN((sizeof(struct gao_action)*queue->full_descriptors.capacity));
 
 	queue->state = GAO_RESOURCE_STATE_REGISTERED;
 	return queue;
@@ -990,9 +876,9 @@ static void gao_free_tx_queue(struct gao_resources *resources, struct gao_tx_que
 
 
 	if(!queue) return;
-
-	gao_dtor_descriptor_vector(&queue->full_descriptors);
-	gao_dtor_descriptor_vector(&queue->empty_descriptors);
+	gao_free_egress_subqueues(resources, queue);
+	gao_dtor_descriptor_list(resources, &queue->full_descriptors);
+	gao_dtor_descriptor_list(resources, &queue->empty_descriptors);
 
 	return;
 }
@@ -1009,24 +895,11 @@ static struct gao_tx_queue* gao_create_tx_queue(struct gao_resources *resources,
 	queue->descriptors = num_descriptors;
 	spin_lock_init(&queue->lock);
 
-	//Init the ring control struct
-	init_waitqueue_head(&queue->control.head_wait_queue);
-	init_waitqueue_head(&queue->control.tail_wait_queue);
-	queue->control.head_wait_queue_ref = &queue->control.head_wait_queue;
-	queue->control.tail_wait_queue_ref = &queue->control.tail_wait_queue;
 
-	queue->control.head_wake_condition_ref = &queue->control.head_wake_condition;
-	queue->control.tail_wake_condition_ref = &queue->control.tail_wake_condition;
-
-	spin_lock_init(&queue->control.head_lock);
-	spin_lock_init(&queue->control.tail_lock);
-
-
-	if(gao_init_descriptor_vector(&queue->full_descriptors, num_descriptors))
+	if(gao_init_descriptor_list(resources, &queue->full_descriptors, num_descriptors))
 		gao_error("Failed to init full descriptors vector");
-	if(gao_init_descriptor_vector(&queue->empty_descriptors, num_descriptors))
+	if(gao_init_descriptor_list(resources, &queue->empty_descriptors, num_descriptors))
 		gao_error("Failed to init empty descriptors vector");
-
 
 	queue->state = GAO_RESOURCE_STATE_REGISTERED;
 	return queue;
@@ -1034,84 +907,6 @@ static struct gao_tx_queue* gao_create_tx_queue(struct gao_resources *resources,
 	gao_free_tx_queue(resources, queue);
 	return NULL;
 }
-
-
-
-
-/**
- * Create a new queue and fill it with valid descriptors. Does not bind the queue to anything.
- * @warning Caller must hold resource lock.
- * @param resources
- * @param size The size of the queue in descriptors.
- * @return The index of the new queue on success, -ENOMEM (if insufficient memory/resources), -EFBIG if queue too big.
- */
-//static struct gao_queue*	gao_create_queue(struct gao_resources *resources, uint64_t num_descriptors, gao_direction_t direction) {
-//	struct gao_queue* 	queue = NULL;
-//	size_t				alloc_size = 0;
-//	void*				pipeline_addr;
-//	log_debug("Creating queue, size=%lu", (unsigned long)num_descriptors);
-//
-//
-//	queue = vmalloc(sizeof(struct gao_queue));
-//	check_ptr(queue);
-//
-//	memset((void*)queue, 0, sizeof(struct gao_queue));
-//
-//
-//
-//	queue->ring = gao_create_descriptor_ring(resources, num_descriptors);
-//	check_ptr(queue->ring);
-//
-//
-//
-//	if(direction == GAO_DIRECTION_RX) {
-//		queue->action_map = vmalloc(sizeof(struct gao_action)*num_descriptors);
-//		check_ptr(queue->action_map);
-//
-//		//The following two structs are mmap'd to userspace. Allocate them as a multiple of the page size.
-//		//I really suck at number theory.
-//		alloc_size = (sizeof(struct gao_descriptor)*num_descriptors*GAO_ING_PIPELINE_DEPTH);
-//		alloc_size = (alloc_size % PAGE_SIZE) ? alloc_size + (PAGE_SIZE-(alloc_size%PAGE_SIZE)) : alloc_size;
-//		queue->descriptor_pipeline = vmalloc(alloc_size);
-//		check_ptr(queue->descriptor_pipeline);
-//		queue->descriptor_pipeline_size = alloc_size;
-//		memset((void*)queue->descriptor_pipeline, 0, alloc_size);
-//
-//		log_debug("Allocated descriptor pipeline size %lu B at %p", alloc_size, queue->descriptor_pipeline);
-//
-//		//Reserve the pages
-//		for(pipeline_addr = queue->descriptor_pipeline; pipeline_addr < ((void*)queue->descriptor_pipeline) + alloc_size; pipeline_addr += PAGE_SIZE) {
-//			SetPageReserved(vmalloc_to_page(pipeline_addr));
-//		}
-//
-//		alloc_size = (sizeof(struct gao_action)*num_descriptors*GAO_ING_PIPELINE_DEPTH);
-//		alloc_size = (alloc_size % PAGE_SIZE) ? alloc_size + (PAGE_SIZE-(alloc_size%PAGE_SIZE)) : alloc_size;
-//		//queue->action_pipeline = vmalloc(sizeof(struct gao_action)*num_descriptors*GAO_ING_PIPELINE_DEPTH);
-//		queue->action_pipeline = vmalloc(alloc_size);
-//		check_ptr(queue->action_pipeline);
-//		queue->action_pipeline_size = alloc_size;
-//		memset((void*)queue->action_pipeline, 0, alloc_size);
-//
-//		log_debug("Allocated action pipeline size %lu B at %p", alloc_size, queue->action_pipeline);
-//
-//		//Reserve the pages
-//		for(pipeline_addr = queue->action_pipeline; pipeline_addr < ((void*)queue->action_pipeline) + alloc_size; pipeline_addr += PAGE_SIZE) {
-//			SetPageReserved(vmalloc_to_page(pipeline_addr));
-//		}
-//	}
-//
-//	queue->descriptors = num_descriptors;
-//	queue->state = GAO_RESOURCE_STATE_REGISTERED;
-//
-//
-//
-//	log_debug("Created queue of size=%lu at addr=%p", (unsigned long)num_descriptors, queue);
-//	return queue;
-//
-//	err:
-//	gao_free_queue(resources, queue);
-//	return NULL;
-//}
 
 
 /**
@@ -1166,7 +961,7 @@ static void	gao_port_null_egress_to_ingress_queue_map(struct gao_resources *reso
  * @param resources
  * @param queue
  */
-static void	gao_free_port_queue(struct gao_resources *resources, struct gao_queue* queue) {
+static void	gao_free_port_rx_queue(struct gao_resources *resources, struct gao_rx_queue* queue) {
 
 	if(!queue) gao_error("Cannot delete queue, pointer null.");
 
@@ -1189,11 +984,40 @@ static void	gao_free_port_queue(struct gao_resources *resources, struct gao_queu
 	if(!queue->binding.gao_file) {
 		gao_free_rx_queue(resources, queue);
 	} else {
-		atomic_long_set(queue->ring->control.head_wake_condition_ref, 1);
-		wake_up_interruptible(queue->ring->control.head_wait_queue_ref);
+		atomic_long_set(&queue->wake_cond, 1);
+		wake_up_interruptible(&queue->wait_queue);
 	}
 
+	err:
+	return;
+}
 
+
+/**
+ * Try to free a HW bound queue from a port. If the queue is bound to a file
+ * it will only set the state and wake the file. The queue is unbound from the
+ * port, but the file must then clean it up.
+ * @warning Caller must hold resource lock
+ * @param resources
+ * @param queue
+ */
+static void	gao_free_port_tx_queue(struct gao_resources *resources, struct gao_tx_queue* queue) {
+	int		spinlock_retries = 5;
+	if(!queue) gao_error("Cannot delete queue, pointer null.");
+
+
+	queue->state = GAO_RESOURCE_STATE_DELETING;
+	queue->hw_private = NULL;
+
+	while(spinlock_retries--) {
+		if(spin_trylock(&queue->lock)) break;
+		log_debug("Failed to lock queue for deletion, retry: %d", spinlock_retries);
+		msleep(2);
+	}
+	if(!spinlock_retries) log_bug("Deleting tx_queue without lock. Danger Will Robinson.");
+
+
+	gao_free_tx_queue(resources, queue);
 
 	err:
 	return;
@@ -1208,7 +1032,9 @@ static void	gao_free_port_queue(struct gao_resources *resources, struct gao_queu
  */
 void	gao_delete_port_queues(struct gao_resources *resources, struct gao_port *port) {
 	uint64_t index;
-	struct gao_queue *queue = NULL;
+
+	struct gao_tx_queue *tx_queue = NULL;
+	struct gao_rx_queue *rx_queue = NULL;
 
 	//Remove references to our port from other ports.
 	gao_port_null_egress_to_ingress_queue_map(resources, port);
@@ -1216,42 +1042,20 @@ void	gao_delete_port_queues(struct gao_resources *resources, struct gao_port *po
 	//**This removes the requirement to check queue state in forwarding code (that is under RCU lock)
 	synchronize_rcu();
 
-	if(port->tx_arbiter_workqueue) {
-	//FIXME: Clean this up, the queue deletion routines also set the deleting state
-	//But we need to kill the arbiters here...
-		log_debug("Port %s[%lu] arbiter cleanup begins", gao_get_port_name(port), (unsigned long)port->gao_ifindex);
-		for(index = 0; index < port->num_tx_queues; index++) {
-			queue = port->tx_queues[index];
-			if(!queue) continue;
-			queue->state = GAO_RESOURCE_STATE_DELETING;
-			log_debug("Waking tx arbiter %lu for deletion", (unsigned long)index);
-			atomic_long_set(queue->ring->control.head_wake_condition_ref, 0);
-			wake_up_interruptible(queue->ring->control.head_wait_queue_ref);
-			atomic_long_set(queue->ring->control.tail_wake_condition_ref, ~0);
-			wake_up_interruptible(queue->ring->control.tail_wait_queue_ref);
-		}
-
-		log_debug("Port %s[%lu] draining arbiter workqueue...", gao_get_port_name(port), (unsigned long)port->gao_ifindex);
-		//This will block until all the tx arbiters have terminated
-		drain_workqueue(port->tx_arbiter_workqueue);
-		log_debug("Port %s[%lu] destroying arbiter workqueue...", gao_get_port_name(port), (unsigned long)port->gao_ifindex);
-		destroy_workqueue(port->tx_arbiter_workqueue);
-		port->tx_arbiter_workqueue = NULL;
-	}
 
 
 	for(index = 0; index < port->num_rx_queues; index++) {
-		queue = port->rx_queues[index];
-		if(!queue) continue;
+		rx_queue = port->rx_queues[index];
+		if(!rx_queue) continue;
 		port->rx_queues[index] = NULL;
-		gao_free_port_queue(resources, queue);
+		gao_free_port_rx_queue(resources, rx_queue);
 	}
 
 	for(index = 0; index < port->num_tx_queues; index++) {
-		queue = port->tx_queues[index];
-		if(!queue) continue;
+		tx_queue = port->tx_queues[index];
+		if(!tx_queue) continue;
 		port->tx_queues[index] = NULL;
-		gao_free_port_queue(resources, queue);
+		gao_free_port_tx_queue(resources, tx_queue);
 	}
 
 
@@ -1270,7 +1074,8 @@ void	gao_delete_port_queues(struct gao_resources *resources, struct gao_port *po
 static int64_t gao_port_bind_egress_to_ingress_queue_map(struct gao_resources *resources, struct gao_port *port) {
 	int64_t 	ret = 0;
 	uint64_t	index = 0, subqueue_index;
-	struct gao_queue *egress_queue = NULL, *ingress_queue = NULL;
+	struct gao_tx_queue *egress_queue = NULL;
+	struct gao_rx_queue *ingress_queue = NULL;
 	struct gao_port	 *other_port = NULL;
 
 	if(!port) gao_bug_val(-EINVAL, "Null port");
@@ -1328,7 +1133,8 @@ static int64_t gao_port_bind_ingress_to_egress_subqueues(struct gao_resources *r
 	int64_t	ret;
 	uint64_t index, subqueue_index;
 	struct gao_port *other_port = NULL;
-	struct gao_queue *ingress_queue = NULL, *egress_queue = NULL;
+	struct gao_tx_queue *egress_queue = NULL;
+	struct gao_rx_queue *ingress_queue = NULL;
 
 	if(!port) gao_bug_val(-EINVAL, "Null port");
 
@@ -1382,8 +1188,7 @@ static int64_t gao_create_egress_subqueues(struct gao_resources *resources, stru
 	ret = gao_create_egress_subqueue(resources, &queue->subqueues[0], queue->descriptors*2);
 	if(ret) gao_error("Failed to create subqueue. (ret=%ld)", (long)ret);
 
-	queue->subqueues[0].ring->control.tail_wait_queue_ref = &queue->control.tail_wait_queue;
-	queue->subqueues[0].ring->control.tail_wake_condition_ref = &queue->control.tail_wake_condition;
+	queue->subqueues[0].ring->control.tail_wake_condition_ref = &queue->active_subq;
 
 
 	return 0;
@@ -1419,11 +1224,14 @@ int64_t gao_create_port_queues(struct gao_resources* resources, struct gao_port 
 		rx_queue = gao_create_rx_queue(resources, port->num_rx_desc);
 		if(!rx_queue) gao_error_val(-ENOMEM, "Failed to alloc rx if queue idx %ld", (long)index);
 
+		rx_queue->index = index;
 		rx_queue->binding.owner_type = GAO_QUEUE_OWNER_PORT;
 		rx_queue->binding.direction_txrx = GAO_DIRECTION_RX;
 		rx_queue->binding.gao_ifindex = port->gao_ifindex;
 		rx_queue->binding.queue_index = index;
 		rx_queue->binding.port = port;
+
+
 
 		rx_queue->state = GAO_RESOURCE_STATE_ACTIVE;
 		port->rx_queues[index] = rx_queue;
@@ -1466,7 +1274,7 @@ int64_t	gao_bind_queue(struct file* filep, struct gao_request_queue *request) {
 	int64_t ret;
 	struct gao_file_private* gao_file = (struct gao_file_private*)filep->private_data;
 	struct gao_port *port = NULL;
-	struct gao_queue *queue = NULL;
+	struct gao_rx_queue *queue = NULL;
 	struct gao_resources* resources = gao_get_resources();
 
 	log_debug("File %p requesting to bind to if/q %llu/%llu", filep, request->gao_ifindex, request->queue_index);
@@ -1516,9 +1324,15 @@ int64_t	gao_bind_queue(struct file* filep, struct gao_request_queue *request) {
 	gao_file->port_ops = port->port_ops;
 	gao_file->state = GAO_RESOURCE_STATE_ACTIVE;
 
-	request->action_pipeline_size = queue->action_pipeline_size;
-	request->descriptor_pipeline_size = queue->descriptor_pipeline_size;
-	request->queue_size = queue->ring->header.capacity;
+	request->queue_size = queue->full_descriptors.capacity;
+	request->descriptor_size = queue->descriptor_size;
+	request->descriptor_ctx_size = queue->descriptor_ctx_size;
+	request->action_size = queue->action_size;
+
+	//FIXME: Descriptor/Action mmap offsets
+//	request->action_pipeline_size = queue->action_pipeline_size;
+//	request->descriptor_pipeline_size = queue->descriptor_pipeline_size;
+//	request->queue_size = queue->ring->header.capacity;
 
 	//gao_file->port_ops->gao_disable_tx_interrupts()
 
@@ -1535,7 +1349,7 @@ int64_t	gao_bind_queue(struct file* filep, struct gao_request_queue *request) {
 
 void	gao_unbind_queue(struct file* filep) {
 	struct gao_file_private* gao_file = (struct gao_file_private*)filep->private_data;
-	struct gao_queue *queue = NULL;
+	struct gao_rx_queue *queue = NULL;
 	struct gao_resources* resources = gao_get_resources();
 
 	log_debug("File %p requesting to unbind.", filep);
@@ -1563,7 +1377,7 @@ void	gao_unbind_queue(struct file* filep) {
 	if(queue->state == GAO_RESOURCE_STATE_DELETING) {
 		log_debug("While unbinding file, queue was deleting. Finish deleting it.");
 		//Free port does a sync RCU
-		gao_free_port_queue(resources, queue);
+		gao_free_port_rx_queue(resources, queue);
 	}
 
 	err:
@@ -1578,7 +1392,7 @@ static void		gao_free_ports(struct gao_resources *resources) {
 
 static int64_t	gao_init_ports(struct gao_resources *resources) {
 	resources->free_ports = GAO_MAX_PORTS;
-	gao_controller_register_port(resources);
+	//gao_controller_register_port(resources);
 	return 0;
 }
 

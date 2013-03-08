@@ -30,10 +30,10 @@ cd $E1000E
 make
 cd ..
 
-echo "=== Building e1000 Driver ==="
-cd $E1000
-make
-cd ..
+#echo "=== Building e1000 Driver ==="
+#cd $E1000
+#make
+#cd ..
 
 echo "=== Done ==="
 

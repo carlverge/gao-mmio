@@ -123,7 +123,25 @@ int64_t		gao_register_port(struct net_device *netdev, struct gao_port_ops* if_op
 }
 EXPORT_SYMBOL(gao_register_port);
 
+/**
+ *
+ * @warning Called under RCU read lock
+ * @param queue
+ * @return
+ */
+static int64_t gao_default_port_scheduler(struct gao_tx_queue* queue) {
+	int64_t ret = 0;
 
+	if(unlikely(!queue)) gao_error("Scheduling null queue");
+	if(unlikely(queue->state != GAO_RESOURCE_STATE_ACTIVE)) gao_error("Scheduling inactive queue");
+
+
+
+
+
+	err:
+	return ret;
+}
 
 static void	gao_priority_scheduler(struct work_struct *work) {
 	struct gao_tx_arbiter 		*tx_arbiter = (struct gao_tx_arbiter*) work;
@@ -236,24 +254,12 @@ static void	gao_priority_scheduler(struct work_struct *work) {
  */
 int64_t		gao_activate_port(struct gao_port* port) {
 	int64_t ret = 0;
-	uint64_t index;
 	struct gao_resources* resources = gao_get_resources();
 
+	port->port_scheduler = gao_default_port_scheduler;
 
 	ret = gao_create_port_queues(resources, port);
 	if(ret) goto err;
-
-	port->tx_arbiter_workqueue = alloc_workqueue((char*)gao_get_port_name(port), WQ_HIGHPRI, port->num_tx_queues);
-	if(!port->tx_arbiter_workqueue)
-		gao_error_val(-ENOMEM, "Failed to create TX arbiter workqueue on port %s[%lu].", gao_get_port_name(port), (unsigned long)port->gao_ifindex);
-
-	//Start the transmit arbiters
-	for(index = 0; index < port->num_tx_queues; index++) {
-		port->tx_arbiters[index].tx_queue = port->tx_queues[index];
-		port->tx_arbiters[index].port = port;
-		INIT_WORK(&port->tx_arbiters[index].work, gao_priority_scheduler);
-		queue_work(port->tx_arbiter_workqueue, &port->tx_arbiters[index].work);
-	}
 
 	return ret;
 	err:

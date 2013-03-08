@@ -156,7 +156,7 @@ void	gao_e1000_init_rx_ring(struct e1000_hw *hw, struct e1000_rx_ring *hw_ring, 
 		gao_desc = (gao_ring->ring->descriptors[index].descriptor);
 //		log_debug("Setting RXDESC %ld to phys addr %016lx", (long)index, descriptor_to_phys_addr(gao_desc));
 		hw_desc = E1000_RX_DESC(*hw_ring, index);
-		hw_desc->buffer_addr = cpu_to_le64(descriptor_to_phys_addr(gao_desc));
+		hw_desc->buffer_addr = cpu_to_le64(gao_descriptor_to_phys_addr(gao_desc));
 	}
 
 	wmb();

@@ -9,7 +9,11 @@
 #define GAO_MMIO_CONSTANTS_H_
 
 //Assert that the condition is true
+#ifdef __KERNEL__
 #define GAO_STATIC_ASSERT(cond, msg)	_Static_assert(cond, msg)
+#else
+#define GAO_STATIC_ASSERT(cond, msg)
+#endif
 //Make sure that the bitfield is the log2 of the parent value
 #define GAO_ASSERT_LOG2(bitval, decval)	GAO_STATIC_ASSERT( ((1 << bitval) == decval), #bitval" is not the log2 of "#decval)
 //Make sure the value is a power of 2
@@ -40,6 +44,7 @@ GAO_STATIC_ASSERT((GAO_BUFFER_SIZE >= GAO_SMALLPAGE_SIZE), "GAO_BUFFER_SIZE is n
 #define GAO_BFN_SHIFT 		13
 GAO_ASSERT_LOG2(GAO_BFN_SHIFT, GAO_BUFFER_SIZE);
 #define GAO_DEFAULT_OFFSET	128
+#define GAO_OFFSET_MASK		0x00000000000000FF
 GAO_STATIC_ASSERT(GAO_DEFAULT_OFFSET >= 0 && GAO_DEFAULT_OFFSET <= 255, "GAO_BUFFER_SIZE is not at least GAO_SMALLPAGE_SIZE");
 #define GAO_PAGE_PER_BUFFER	(GAO_BUFFER_SIZE/GAO_SMALLPAGE_SIZE)
 #define GAO_HUGEPAGES		((GAO_BUFFER_SIZE*GAO_BUFFERS)/GAO_HUGEPAGE_SIZE)
@@ -88,7 +93,7 @@ GAO_STATIC_ASSERT( (GAO_BUFFERS*GAO_BUFFER_SIZE) >= GAO_HUGEPAGE_SIZE,
 #define CIRC_DIFF64(b,a,max) ((b-a) + (max*(((b-a) & 0x8000000000000000)>>63)))
 
 #define GAO_FFSL(x)	__builtin_ffsl(x)
-
+#define GAO_PAGEALIGN(alloc_size) (alloc_size % GAO_SMALLPAGE_SIZE) ? alloc_size + (GAO_SMALLPAGE_SIZE-(alloc_size%GAO_SMALLPAGE_SIZE)) : alloc_size;
 
 #endif /* GAO_MMIO_CONSTANTS_H_ */
 

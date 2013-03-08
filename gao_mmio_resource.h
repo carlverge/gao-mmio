@@ -122,14 +122,10 @@ struct	gao_descriptor {
 };
 GAO_STATIC_ASSERT( (sizeof(struct gao_descriptor) == 8), "gao_descriptor size=8");
 
-static inline unsigned long descriptor_to_phys_addr(struct gao_descriptor descriptor) {
-	return GAO_DESC_TO_PHYS(descriptor);
-}
 
-static inline void* descriptor_to_virt_addr(struct gao_descriptor descriptor) {
-	return GAO_DESC_TO_VIRT(descriptor);
+static inline void* gao_descriptor_to_pkt(struct gao_descriptor descriptor, unsigned long offset) {
+	return (void*)(offset + GAO_DESC_TO_PHYS(descriptor));
 }
-
 
 
 struct gao_descriptor_ring_header {
@@ -197,6 +193,27 @@ typedef enum gao_port_type_t {
 
 
 #ifdef __KERNEL__
+
+
+static inline unsigned long gao_descriptor_to_phys_addr(struct gao_descriptor descriptor) {
+	return GAO_DESC_TO_PHYS(descriptor);
+}
+
+static inline struct gao_descriptor gao_phys_addr_to_descriptor(unsigned long physaddr) {
+	struct gao_descriptor desc = {
+		.index = physaddr >> GAO_BFN_SHIFT,
+		.offset = physaddr & GAO_OFFSET_MASK,
+	};
+	return desc;
+}
+
+static inline void* descriptor_to_virt_addr(struct gao_descriptor descriptor) {
+	return GAO_DESC_TO_VIRT(descriptor);
+}
+
+
+
+
 /* Kernel-only structs */
 struct gao_queue_binding {
 	gao_owner_type_t			owner_type;
@@ -276,6 +293,8 @@ static inline struct gao_descriptor_context* gao_descriptor_ring_ctx(struct gao_
 
 
 
+
+
 struct gao_egress_subqueue {
 	struct gao_descriptor_ring	*ring;
 //	uint64_t					size;
@@ -294,9 +313,10 @@ struct gao_ingress_queue_map {
 
 
 
-struct gao_descriptor_vector {
-	uint32_t	capacity;
-	uint32_t	size;
+struct gao_descriptor_list {
+	uint32_t	capacity; //total size of the list
+	uint32_t	watermark; //size the list is refilled to
+	uint32_t	count; //The current occupancy count of the list
 	struct gao_descriptor *descriptors;
 	struct gao_descriptor_context *contexts;
 };
@@ -319,14 +339,23 @@ struct gao_rx_queue {
 	void					*hw_private; //Pointer for drivers to store rings/adapter structs for quick access
 	//Must be held during rx/tx, or to delete the queue.
 	spinlock_t				lock;
+	atomic_long_t			wake_cond;
+	wait_queue_head_t		wait_queue;
 
 	//Userspace binding information
 	struct gao_queue_binding 	binding;
 
+	//Shadows the NIC ring with GAO descriptors
+	struct gao_descriptor		*shadow_ring;
 	//The next three structs can be mapped to userspace
-	struct gao_descriptor_vector	empty_descriptors;
-	struct gao_descriptor_vector	full_descriptors;
-	struct gao_action				*actions;
+	struct gao_descriptor_list	empty_descriptors;
+	struct gao_descriptor_list	full_descriptors;
+	struct gao_action			*actions;
+	//Used for MMAPing
+	size_t	descriptor_size;
+	size_t	descriptor_ctx_size;
+	size_t	action_size;
+
 
 	//Contains mapping between port/queue id and destination queue struct.
 	struct gao_ingress_queue_map	queue_map;
@@ -346,15 +375,15 @@ struct gao_tx_queue {
 	uint64_t				flags;
 	uint64_t				descriptors; //Size of descriptor vector
 	void					*hw_private; //Pointer for drivers to store rings/adapter structs for quick access
-	//Must be held during rx/tx, or to delete the queue.
+	//Locked on entry into the scheduling loop, not unlocked until ingr queues empty.
 	spinlock_t				lock;
 
 	//Control struct for wake lists
-	struct gao_descriptor_ring_control	control;
-	struct gao_descriptor_vector	empty_descriptors;
-	struct gao_descriptor_vector	full_descriptors;
+	struct gao_descriptor_list	empty_descriptors;
+	struct gao_descriptor_list	full_descriptors;
 
 	//Subqueues this queue can receive on.
+	atomic_long_t					active_subq; //bitmap of active subqueues (bit position = subq id)
 	struct gao_egress_subqueue		subqueues[GAO_MAX_PORT_SUBQUEUE];
 };
 
@@ -413,7 +442,7 @@ struct gao_file_private {
 	uint64_t				bound_gao_ifindex;
 	uint64_t				bound_queue_index;
 	gao_direction_t			bound_direction;
-	struct gao_queue		*bound_queue;
+	struct gao_rx_queue		*bound_queue;
 	struct gao_port_ops		*port_ops;
 };
 
@@ -422,13 +451,13 @@ struct gao_port_ops {
 	int64_t		(*gao_disable)(struct net_device*);
 	ssize_t		(*gao_read)(struct gao_file_private*, size_t size);
 	ssize_t		(*gao_write)(struct gao_file_private*, size_t size);
-	ssize_t		(*gao_clean)(struct gao_queue*, size_t num_to_clean);
-	ssize_t		(*gao_recv)(struct gao_queue*, size_t num_to_read);
+	int32_t		(*gao_clean)(struct gao_descriptor_list*, struct gao_descriptor* shadow, uint32_t num_to_clean, void *hw_private);
+	int32_t		(*gao_recv)(struct gao_descriptor_list*, struct gao_descriptor* shadow, uint32_t num_to_recv, void *hw_private);
 	ssize_t		(*gao_xmit)(struct gao_queue*);
-	void		(*gao_enable_rx_interrupts)(struct gao_queue* queue);
-	void		(*gao_enable_tx_interrupts)(struct gao_queue* queue);
-	void		(*gao_disable_rx_interrupts)(struct gao_queue* queue);
-	void		(*gao_disable_tx_interrupts)(struct gao_queue* queue);
+	void		(*gao_enable_rx_interrupts)(struct gao_rx_queue*);
+	void		(*gao_enable_tx_interrupts)(struct gao_tx_queue*);
+	void		(*gao_disable_rx_interrupts)(struct gao_rx_queue*);
+	void		(*gao_disable_tx_interrupts)(struct gao_tx_queue*);
 };
 
 
@@ -465,6 +494,9 @@ struct gao_port {
 	struct gao_tx_queue		*tx_queues[GAO_MAX_PORT_HWQUEUE];
 
 	//Scheduling arbiters attached to HW queues that serialize SW queues to the NIC ring
+	int64_t					(*port_scheduler)(struct gao_tx_queue*);
+
+
 	struct workqueue_struct	*tx_arbiter_workqueue;
 	struct gao_tx_arbiter	tx_arbiters[GAO_MAX_PORT_HWQUEUE];
 };
@@ -477,6 +509,95 @@ struct gao_descriptor_allocator_ring {
 	uint64_t		tail; //Pointer to the next descriptor that can be freed
 	uint64_t		left; //How many are left
 };
+
+
+static inline void gao_lock_descriptor_allocator(struct gao_descriptor_allocator_ring *ring) {
+	log_debug("Spinlocking descriptor ring");
+	spin_lock(&ring->lock);
+	log_debug("Locked descriptor ring");
+}
+
+static inline void gao_unlock_descriptor_ring(struct gao_descriptor_allocator_ring *ring) {
+	log_debug("Unlocking descriptor ring");
+	spin_unlock(&ring->lock);
+}
+
+/**
+ * Fill the target descriptor list with as many free descriptors as possible.
+ * If there were no descriptors left, it is possible none were added. Will
+ * fill to either the capacity of the list, or until descriptors run out.
+ * @param list
+ * @return The number of descriptors copied into the list
+ */
+static inline uint32_t	gao_refill_descriptors(struct gao_descriptor_allocator_ring *ring, struct gao_descriptor_list* list) {
+	//struct gao_descriptor_allocator_ring *ring = &gao_get_resources()->descriptor_ring;
+	uint32_t num_to_copy, num_left;
+	uint64_t head = ring->head; //copy of the original head value
+
+	//We're already above the watermark, don't refill any more.
+	if(unlikely(list->count > list->watermark))
+		return 0;
+
+	gao_lock_descriptor_allocator(ring);
+
+	//Get the minimum of either descriptors left in the ring or the amount to fill to the watermark.
+	num_to_copy = num_left = ((list->watermark - list->count) < ring->left) ? (list->watermark - list->count) : ring->left;
+	ring->head = (head+num_to_copy) & (GAO_DESCRIPTORS-1); //pre-increment the head so we can unlock early
+	ring->left -= num_to_copy;
+
+	gao_unlock_descriptor_ring(ring);
+
+	while(num_left--) {
+		list->descriptors[list->count] = ring->descriptors[head];
+		list->count++;
+		head = (head+1) & (GAO_DESCRIPTORS-1);
+	}
+
+	return num_to_copy;
+}
+
+
+
+/**
+ * Return empty descriptors back to the descriptor ring. Will empty out the
+ * list given back into the descriptor ring.
+ * @param list
+ * @return The number of descriptors copied into the list
+ */
+static inline void	gao_return_descriptors(struct gao_descriptor_allocator_ring *ring, struct gao_descriptor_list* list) {
+	//struct gao_descriptor_allocator_ring *ring = &gao_get_resources()->descriptor_ring;
+	uint32_t num_to_copy;
+	uint64_t tail = ring->tail; //copy of the original head value
+
+	gao_lock_descriptor_allocator(ring);
+
+	//Get the minimum of either descriptors left in the ring or the capacity.
+	num_to_copy = list->count;
+
+	if(unlikely((list->count+ring->left) > GAO_DESCRIPTORS)) {
+		log_bug("Trying to return more descriptors than should exist! (in list=%u ring=%llu max=%d)",
+				list->count, ring->left, GAO_DESCRIPTORS );
+	}
+
+	while(num_to_copy--) {
+		list->count--;
+		ring->descriptors[tail] = list->descriptors[list->count];
+		tail = (tail+1) & (GAO_DESCRIPTORS-1);
+	}
+
+	//Have to lock it for whole duration -- another CPU could try to refill desc while we return them.
+	ring->tail = tail;
+	ring->left += num_to_copy;
+	gao_unlock_descriptor_ring(ring);
+
+}
+
+
+
+
+
+
+
 
 struct gao_resources {
 	/*Control*/
@@ -565,8 +686,9 @@ struct gao_request_queue {
 	uint64_t					queue_size;
 	uint64_t					gao_ifindex;
 	uint64_t					queue_index;
-	uint64_t					descriptor_pipeline_size;
-	uint64_t					action_pipeline_size;
+	size_t	descriptor_size;
+	size_t	descriptor_ctx_size;
+	size_t	action_size;
 	gao_direction_t				direction_txrx;
 };
 
@@ -664,7 +786,7 @@ void		gao_unlock_file(struct gao_file_private *gao_file);
 int			gao_lock_file(struct gao_file_private *gao_file);
 
 /* Exported functions */
-inline 		unsigned long 	descriptor_to_phys_addr(struct gao_descriptor descriptor);
+inline 		unsigned long 	gao_descriptor_to_phys_addr(struct gao_descriptor descriptor);
 inline 		void* 			descriptor_to_virt_addr(struct gao_descriptor descriptor);
 
 int			gao_lock_resources(struct gao_resources* resources);
