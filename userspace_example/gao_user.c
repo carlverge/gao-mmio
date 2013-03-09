@@ -135,13 +135,13 @@ struct gao_context* gao_create_context() {
 	//Get the info required to MMAP
 	if(ioctl(fd, GAO_IOCTL_COMMAND_GET_MMAP_SIZE, &mmap_info)) gao_error("MMAP IOCTL Failed.");
 
-	log_debug("Got a size of %ldB, %ldMB. offset=%lx",
-			mmap_info.size, mmap_info.size >> 20, mmap_info.offset);
+	log_debug("Got a size of %ldB, %ldMB, offset=%lx gridspace_size=%ldMB",
+			mmap_info.bufferspace_size, mmap_info.bufferspace_size >> 20, mmap_info.offset, mmap_info.gridspace_size);
 
 
 	//Perform the MMAP
-	log_debug("Attempting to MMAP GAOMMIO space");
-	mmap_addr = mmap(0, mmap_info.size, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_LOCKED, fd, 0);
+	log_debug("Attempting to MMAP GAOMMIO bufferspace");
+	context->buffer_addr = mmap(0, mmap_info.bufferspace_size, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_LOCKED, fd, 0);
 
 	if(mmap_addr < 0) gao_error("MMAP Failed.");
 

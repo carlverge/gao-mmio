@@ -9,6 +9,9 @@
 #endif
 
 #include <linux/delay.h>
+#include <linux/wait.h>
+#include <linux/rcupdate.h>
+#include <linux/mm.h>
 #include "gao_mmio_resource.h"
 
 
@@ -19,173 +22,10 @@ const char*	gao_resource_state_string(gao_resource_state_t state) {
 	else return gao_resource_state_str[state];
 }
 
-const static char *gao_owner_str[] = {"None", "Userspace", "Interface"};
-const static char *gao_direction_str[] = {"NA", "RX", "TX"};
 
-
-void	gao_dump_buffers(struct gao_resources *resources) {
-//	uint64_t index;
-//	log_debug("Dump Buffer Groups: start=%lu end=%lu frame=%lu",
-//			resources->buffer_start_phys, resources->buffer_end_phys, resources->buffer_space_frame);
-//	for(index = 0; index < GAO_BUFFER_GROUPS; index++) {
-//		log_debug("Index:%8lu virtaddr=%p",
-//				(unsigned long)index, resources->buffer_groups[index]);
-//	}
-}
-
-void	gao_dump_descriptor(struct	gao_descriptor *desc) {
-//	log_debug("Desc: %016lx GFN=%04hx BufIdx=%04hx Len=%04hx Offset=%04hx",
-//			(unsigned long)desc->descriptor, desc->gfn, desc->index, desc->len, desc->offset);
-}
-
-void	gao_dump_descriptors(struct gao_resources *resources) {
-//	uint64_t index;
-//	log_debug("Dump Descriptors %p: head=%lu tail=%lu left=%lu",
-//			resources->descriptor_ring.descriptors,
-//			(unsigned long)resources->descriptor_ring.head,
-//			(unsigned long)resources->descriptor_ring.tail,
-//			(unsigned long)resources->descriptor_ring.left);
-//
-//	for(index = 0; index < GAO_DESCRIPTORS; index++) {
-//			gao_dump_descriptor(&(*resources->descriptor_ring.descriptors)[index]);
-//	}
-
-}
-
-void	gao_dump_descriptor_ring(struct gao_descriptor_ring *ring) {
-//	uint64_t index;
-//	if(!ring) {
-//		log_debug("Dump Descriptor Ring: %p", ring);
-//		return;
-//	}
-//	log_debug("Dump Descriptor Ring: (dump %lu descriptors)", (unsigned long)ring->header.capacity);
-//	log_debug("head=%10u tail=%10u size=%10u capacity=%10u",
-//			(unsigned)ring->header.head, (unsigned)ring->header.tail,
-//			(unsigned)ring->header.size, (unsigned)ring->header.capacity);
-//	for(index = 0; index < ring->header.capacity; index++) {
-//		gao_dump_descriptor(&ring->descriptors[index]);
-//	}
-
-}
-
-void	gao_dump_descriptor_ring_nested(struct gao_descriptor_ring *ring) {
-//	uint64_t index;
-//	gao_dump_descriptor_ring(ring);
-//	if(!ring) return;
-//	for(index = 0; index < ring->header.capacity; index++) {
-//		gao_dump_descriptor(&ring->descriptors[index]);
-//	}
-
-}
-
-void	gao_dump_action(struct gao_action *action) {
-//	log_debug("Action: id=%hhu port=%hhu queue=%hhu", action->action_id, action->fwd.dport, action->fwd.dqueue);
-}
-
-void	gao_dump_resources(struct gao_resources *resources) {
-	log_debug("Resources:");
-}
-
-void	gao_dump_ingress_queue_map(struct gao_ingress_queue_map *map) {
-	uint64_t port_index, subqueue_index, has_queues;
-	log_debug("Dumping Ingress Queue Map:");
-	for(port_index = 0; port_index < GAO_MAX_PORTS; port_index++) {
-		//Only dump if the port actually has queues
-		for(subqueue_index = 0, has_queues = 0; subqueue_index < GAO_MAX_PORT_SUBQUEUE; subqueue_index++) {
-			if(map->port[port_index].ring[subqueue_index]) has_queues++;
-		}
-		if(!has_queues) continue;
-
-		log_debug("Port %lu map:", (unsigned long)port_index);
-
-		for(subqueue_index = 0; subqueue_index < GAO_MAX_PORT_SUBQUEUE; subqueue_index++) {
-			log_debug("	[%lu]->%p", (unsigned long)subqueue_index,map->port[port_index].ring[subqueue_index]);
-		}
-	}
-}
-
-void	gao_dump_queue_binding(struct gao_queue_binding *binding) {
-
-	log_debug("Queue Binding:");
-	log_debug("Owner Type:%10s filep=%p IfIndex/Queue/Direction=%lu/%lu/%2s",
-			gao_owner_str[binding->owner_type], binding->gao_file,
-			(unsigned long)binding->gao_ifindex, (unsigned long)binding->queue_index,
-			gao_direction_str[binding->direction_txrx]);
-}
-
-void	gao_dump_queue(struct gao_queue *queue) {
-	uint64_t index;
-	log_debug("Dump Queue: index=%lu state=%s flags=%lx descriptors=%lu ring=%p",
-			(unsigned long)queue->index, gao_resource_state_str[queue->state],
-			(unsigned long)queue->flags, (unsigned long)queue->descriptors, queue->ring);
-
-	gao_dump_queue_binding(&queue->binding);
-
-	for(index = 0; index < GAO_MAX_PORT_SUBQUEUE; index++) {
-		log_debug("Subqueue Ring[%lu]: %p", (unsigned long)index, queue->subqueues[index].ring);
-	}
-
-	gao_dump_ingress_queue_map(&queue->queue_map);
-}
-
-
-void	gao_dump_queue_nested(struct gao_queue *queue) {
-	gao_dump_queue(queue);
-
-	if(queue->ring) gao_dump_descriptor_ring(queue->ring);
-}
-
-void	gao_dump_port(struct gao_port* port) {
-	log_debug("Dumping Port %lu: name=%s ifindex=%lu state=%s",
-			(unsigned long)port->gao_ifindex, gao_get_port_name(port), (unsigned long)port->ifindex, gao_resource_state_string(port->state));
-	log_debug("netdev=%p port_ops=%p", port->netdev, port->port_ops);
-	log_debug("Num Queues/Descriptors: rx=%u/%u tx=%u/%u",
-			(unsigned)port->num_rx_queues, (unsigned)port->num_rx_desc, (unsigned)port->num_tx_queues, (unsigned)port->num_tx_desc);
-}
-
-void gao_dump_port_nested(struct gao_port* port) {
-	uint64_t index;
-	gao_dump_port(port);
-	log_debug("RX Queues:");
-	for(index = 0; index < port->num_rx_queues; index++) {
-		if(!port->rx_queues[index]) continue;
-		//gao_dump_queue(port->rx_queues[index]);
-	}
-
-	for(index = 0; index < port->num_tx_queues; index++) {
-		if(!port->tx_queues[index]) continue;
-		//gao_dump_queue(port->tx_queues[index]);
-	}
-
-}
-
-void gao_dump_ports(struct gao_resources *resources) {
-	uint64_t index;
-	for(index = 0; index < GAO_MAX_PORTS; index++) {
-		if(resources->ports[index].state == GAO_RESOURCE_STATE_UNUSED) continue;
-		gao_dump_port(&resources->ports[index]);
-	}
-}
-
-void gao_dump_ports_nested(struct gao_resources *resources) {
-	uint64_t index;
-	for(index = 0; index < GAO_MAX_PORTS; index++) {
-		if(resources->ports[index].state == GAO_RESOURCE_STATE_UNUSED) continue;
-		gao_dump_port_nested(&resources->ports[index]);
-	}
-}
-
-
-void	gao_dump_file(struct file *filep) {
-	struct gao_file_private *file_private = (struct gao_file_private*) filep->private_data;
-	log_debug("Dump File: state=%s filep=%p bind if/q/dir %lu/%lu/%d queue=%p",
-			gao_resource_state_string(file_private->state), filep,
-			(unsigned long)file_private->bound_gao_ifindex, (unsigned long)file_private->bound_queue_index,
-			file_private->bound_direction, file_private->bound_queue);
-}
-
-
-
+#define GAO_BUFFER_FILL_VAL			(0xDEADBEEF)
+#define GAO_BUFFER_TEST_STR_LEN		(16)
+#define GAO_BUFFER_TEST_STR_FMT		"GAO:BFN%08x"
 /**
  * This "validates" the buffers by checking if we kernel panic when we
  * write into them. Writes a unique string into each buffer we can check
@@ -488,7 +328,7 @@ static int64_t	gao_validate_descriptor_allocator_ring(struct gao_resources *reso
 	char		descriptor_str[GAO_BUFFER_TEST_STR_LEN], buffer_str[GAO_BUFFER_TEST_STR_LEN];
 	uint32_t	*dead_cows;
 	struct gao_descriptor descriptor;
-	struct gao_descriptor *descriptors = resources->descriptor_ring.descriptors;
+	struct gao_descriptor *descriptors = resources->descriptor_allocator.descriptors;
 
 	log_info("Validating descriptors.");
 
@@ -543,8 +383,8 @@ static int64_t	gao_validate_descriptor_allocator_ring(struct gao_resources *reso
 static void	gao_free_descriptor_allocator_ring(struct gao_resources *resources) {
 	log_info("Free descriptor groups.");
 
-	if(resources->descriptor_ring.descriptors)
-		vfree(resources->descriptor_ring.descriptors);
+	if(resources->descriptor_allocator.descriptors)
+		vfree(resources->descriptor_allocator.descriptors);
 
 	return;
 }
@@ -583,11 +423,10 @@ static int64_t	gao_init_descriptor_allocator_ring(struct gao_resources *resource
 	log_info("Created %lu descriptors (Max=%lu).",
 			(unsigned long)i, (unsigned long)GAO_DESCRIPTORS);
 
-	resources->descriptor_ring.descriptors = descriptors;
-	resources->descriptor_ring.head = 0;
-	resources->descriptor_ring.tail = 0;
-	resources->descriptor_ring.left = i;
-	spin_lock_init(&resources->descriptor_ring.lock);
+	resources->descriptor_allocator.descriptors = descriptors;
+	resources->descriptor_allocator.use = 0;
+	resources->descriptor_allocator.avail = i;
+	spin_lock_init(&resources->descriptor_allocator.lock);
 
 	if(i != GAO_DESCRIPTORS)
 		gao_bug_val(-EINVAL, "Mismatch between number of descriptors and buffers!");
@@ -604,657 +443,253 @@ static int64_t	gao_init_descriptor_allocator_ring(struct gao_resources *resource
 
 
 
-inline static void	gao_free_descriptor_ring(struct gao_resources *resources, struct gao_descriptor_ring *ring) {
-
-	if(!ring) {
-		log_debug("Trying to free null descriptor ring.");
-		return;
-	}
-
-	vfree(ring);
-
-	return;
-}
-
 
 /**
- * Create and initialize a new descriptor ring. No descriptors are allocated.
- * @warning Resource lock ... actually doesn't need to be held.
- * @param resources
- * @param num_descriptors
- * @return
+ * @warning Should only be called on module initialization.
  */
-static struct gao_descriptor_ring*	gao_create_descriptor_ring(struct gao_resources *resources, uint64_t num_descriptors) {
-	struct gao_descriptor_ring 	*ring = NULL;
-	uint64_t				queue_size = 0;
+static void	gao_grid_free(struct gao_grid* grid) {
+	uint32_t	page_id;
+
+	if(!grid)
+		return;
+
+	for(page_id = 0; page_id < (sizeof(struct gao_grid) / GAO_SMALLPAGE_SIZE); page_id++) {
+		ClearPageReserved(vmalloc_to_page(((void*)grid) + (page_id*GAO_SMALLPAGE_SIZE)));
+	}
+
+	vfree(grid);
+}
+
+/**
+ * @warning Should only be called on module initialization.
+ * @return Pointer to a new grid.
+ */
+static struct gao_grid*	gao_grid_create(void) {
+	struct gao_grid* grid = NULL;
+	uint32_t	page_id;
 
 
-	queue_size = (sizeof(struct gao_descriptor_ring_header)
-			+ (sizeof(struct gao_descriptor)*num_descriptors)
-			+ (sizeof(struct gao_descriptor_context)*num_descriptors));
+	grid = vmalloc(sizeof(struct gao_grid));
+	check_ptr(grid);
+	memset((void*)grid, 0, sizeof(struct gao_grid));
 
-	ring = vmalloc(queue_size);
-	check_ptr(ring);
+	for(page_id = 0; page_id < (sizeof(struct gao_grid) / GAO_SMALLPAGE_SIZE); page_id++) {
+		SetPageReserved(vmalloc_to_page(((void*)grid) + (page_id*GAO_SMALLPAGE_SIZE)));
+	}
 
-	memset((void*)ring, 0, queue_size);
-
-//	if(gao_get_descriptors(resources, &ring->descriptors, num_descriptors))
-//		gao_error("User queue creation failed, insufficient descriptors.");
-
-
-
-	//Initialize the ring values
-//	for(index = 0; index < num_descriptors; index++) {
-//		ring->descriptors[index].len = 0;
-//		ring->descriptors[index].offset = GAO_DEFAULT_OFFSET;
-//	}
-
-	ring->header.capacity = num_descriptors;
-
-	init_waitqueue_head(&ring->control.head_wait_queue);
-	init_waitqueue_head(&ring->control.tail_wait_queue);
-	ring->control.head_wait_queue_ref = &ring->control.head_wait_queue;
-	ring->control.tail_wait_queue_ref = &ring->control.tail_wait_queue;
-
-	ring->control.head_wake_condition_ref = &ring->control.head_wake_condition;
-	ring->control.tail_wake_condition_ref = &ring->control.tail_wake_condition;
-
-	spin_lock_init(&ring->control.head_lock);
-	spin_lock_init(&ring->control.tail_lock);
-
-	return ring;
-
+	return grid;
 	err:
-	gao_free_descriptor_ring(resources, ring);
+	gao_grid_free(grid);
 	return NULL;
 }
 
+static void	gao_dtor_grid_allocator(struct gao_grid_allocator *allocator) {
+	uint16_t grid_id;
 
+	log_debug("Freeing grid allocator.");
 
+	if(!allocator) return;
 
-static void	gao_free_egress_subqueue(struct gao_resources *resources, struct gao_egress_subqueue *subqueue) {
-	if(subqueue->ring) gao_free_descriptor_ring(resources, subqueue->ring);
-	subqueue->ring = NULL;
-}
-
-/**
- * Create the subqueues for an egress queue.
- * @warning Caller must hold resource lock
- * @param resources
- * @param port
- */
-static void gao_free_egress_subqueues(struct gao_resources *resources, struct gao_tx_queue *queue) {
-	int64_t index;
-	log_debug("Free subqueues for queue %p", queue);
-	if(!queue) return;
-	for(index = 0; index < GAO_MAX_PORT_SUBQUEUE; index++) {
-		gao_free_egress_subqueue(resources, &queue->subqueues[index]);
+	for(grid_id = 0; grid_id < GAO_GRIDS; grid_id++) {
+		gao_grid_free(allocator->grids[grid_id]);
 	}
-}
-
-
-static int64_t	gao_create_egress_subqueue(struct gao_resources *resources, struct gao_egress_subqueue *subqueue, uint64_t num_descriptors) {
-	int64_t ret = 0;
-
-	subqueue->ring = gao_create_descriptor_ring(resources, num_descriptors);
-	check_ptr_val(-ENOMEM, subqueue->ring);
-
-	subqueue->ring->header.head = 0;
-	subqueue->ring->header.tail = 0;
-
-	log_debug("Successfully created subqueue.");
-	return 0;
-	err:
-	gao_free_egress_subqueue(resources, subqueue);
-	return ret;
-}
-
-
-
-
-
-static void	gao_dtor_descriptor_list(struct gao_resources *resources, struct gao_descriptor_list* list) {
-	void*	page_addr;
-	size_t	alloc_size = 0;
-	if(!list) return;
-
-	if(list->descriptors) {
-
-		if(list->count)
-			gao_return_descriptors(&resources->descriptor_ring, list);
-
-		alloc_size = GAO_PAGEALIGN((sizeof(struct gao_descriptor)*list->capacity));
-		for(page_addr = list->descriptors; page_addr < ((void*)list->descriptors) + alloc_size; page_addr += PAGE_SIZE) {
-			ClearPageReserved(vmalloc_to_page(page_addr));
-		}
-		vfree(list->descriptors);
-	}
-
-	if(list->contexts) {
-		alloc_size = GAO_PAGEALIGN((sizeof(struct gao_descriptor_context)*list->capacity));
-		for(page_addr = list->contexts; page_addr < ((void*)list->contexts) + alloc_size; page_addr += PAGE_SIZE) {
-			ClearPageReserved(vmalloc_to_page(page_addr));
-		}
-		vfree(list->contexts);
-	}
-}
-
-
-/**
- * Initialize an existing descriptor_vector struct.
- * @param vector Pointer to the vector to init.
- * @param capacity The size in descriptors of the vector.
- * @return Returns 0 on success, -ENOMEM on failure.
- */
-static int64_t	gao_init_descriptor_list(struct gao_resources *resources, struct gao_descriptor_list* list, uint32_t capacity) {
-	size_t	alloc_size = 0;
-	void*	page_addr;
-
-	if(!list) gao_error("Null list, cannot init.");
-
-	list->capacity = capacity;
-	list->watermark = capacity;
-	list->count = 0;
-	list->descriptors = NULL;
-	list->contexts = NULL;
-
-	alloc_size = GAO_PAGEALIGN((sizeof(struct gao_descriptor)*capacity));
-	list->descriptors = vmalloc(alloc_size);
-	check_ptr(list->descriptors);
-	memset((void*)list->descriptors, 0, alloc_size);
-	log_debug("Allocated list descriptors size %lu B at %p", alloc_size, list->descriptors);
-
-	for(page_addr = list->descriptors; page_addr < ((void*)list->descriptors) + alloc_size; page_addr += PAGE_SIZE) {
-		SetPageReserved(vmalloc_to_page(page_addr));
-	}
-
-	alloc_size = GAO_PAGEALIGN((sizeof(struct gao_descriptor_context)*capacity));
-	list->contexts = vmalloc(alloc_size);
-	check_ptr(list->contexts);
-	memset((void*)list->contexts, 0, alloc_size);
-	log_debug("Allocated list contexts size %lu B at %p", alloc_size, list->contexts);
-
-	for(page_addr = list->contexts; page_addr < ((void*)list->contexts) + alloc_size; page_addr += PAGE_SIZE) {
-		SetPageReserved(vmalloc_to_page(page_addr));
-	}
-
-	return 0;
-	err:
-	gao_dtor_descriptor_list(resources, list);
-	return -ENOMEM;
-}
-
-static void gao_free_rx_queue(struct gao_resources *resources, struct gao_rx_queue* queue) {
-	size_t					alloc_size = 0;
-	void*					page_addr;
-	log_debug("Deleting rx queue at %p", queue);
-
-
-	if(!queue) return;
-
-	if(queue->shadow_ring) kfree(queue->shadow_ring);
-
-	gao_dtor_descriptor_list(resources, &queue->full_descriptors);
-	gao_dtor_descriptor_list(resources, &queue->empty_descriptors);
-
-	if(queue->actions) {
-		alloc_size = GAO_PAGEALIGN((sizeof(struct gao_action)*queue->descriptors));
-		for(page_addr = queue->actions; page_addr < ((void*)queue->actions) + alloc_size; page_addr += PAGE_SIZE) {
-			ClearPageReserved(vmalloc_to_page(page_addr));
-		}
-		vfree(queue->actions);
-	}
-
 
 	return;
 }
 
-/**
- * Allocate and initializa a new RX queue. The descriptor memory is reserved for memory
- * mapping, and the empty descriptor list is pre-populated with descriptors. The number of
- * descriptors must be a power of 2. NIC specific initialization will still need to be done.
- * @param resources
- * @param num_descriptors
- * @return NULL on failure, otherwise a pointer to a new RX queue.
- */
-static struct gao_rx_queue* gao_create_rx_queue(struct gao_resources *resources, uint64_t num_descriptors) {
-	struct gao_rx_queue* 	queue = NULL;
-	size_t					alloc_size = 0;
-	void*					page_addr;
-	log_debug("Creating rx queue, size=%lu", (unsigned long)num_descriptors);
+static int64_t	gao_init_grid_allocator(struct gao_grid_allocator *allocator) {
+	uint16_t grid_id;
+	log_debug("Initializing grid allocator.");
+	if(!allocator) gao_error("Null allocator");
 
-
-	queue = vmalloc(sizeof(struct gao_rx_queue));
-	check_ptr(queue);
-	memset((void*)queue, 0, sizeof(struct gao_rx_queue));
-
-	queue->descriptors = num_descriptors;
-	spin_lock_init(&queue->lock);
-	init_waitqueue_head(&queue->wait_queue);
-
-	queue->shadow_ring = kmalloc(sizeof(struct gao_descriptor)*num_descriptors, GFP_KERNEL);
-	check_ptr(queue->shadow_ring);
-
-	if(gao_init_descriptor_list(resources, &queue->full_descriptors, num_descriptors*2))
-		gao_error("Failed to init full descriptors vector");
-	if(gao_init_descriptor_list(resources, &queue->empty_descriptors, num_descriptors*4))
-		gao_error("Failed to init empty descriptors vector");
-
-	//Set to half the capacity, we need to be able to accept dropped full descriptors after a refill.
-	queue->empty_descriptors.watermark = num_descriptors*2;
-	//Do an initial fill of the empty descriptors
-	alloc_size = gao_refill_descriptors(&resources->descriptor_ring, &queue->empty_descriptors);
-	if(alloc_size != queue->empty_descriptors.watermark)
-		gao_error("Failed populate empty descriptors (needed=%u got=%ld)", queue->empty_descriptors.watermark, alloc_size);
-
-
-	//Allocate actions for mmaping to userspace
-	alloc_size = GAO_PAGEALIGN((sizeof(struct gao_action)*queue->full_descriptors.capacity));
-	queue->actions = vmalloc(alloc_size);
-	check_ptr(queue->actions);
-	memset((void*)queue->actions, 0, alloc_size);
-	log_debug("Allocated rx queue actions size %lu B at %p", alloc_size, queue->actions);
-
-	for(page_addr = queue->actions; page_addr < ((void*)queue->actions) + alloc_size; page_addr += PAGE_SIZE) {
-		SetPageReserved(vmalloc_to_page(page_addr));
+	for(grid_id = 0; grid_id < GAO_GRIDS; grid_id++) {
+		allocator->grids[grid_id] = gao_grid_create();
+		check_ptr(allocator->grids[grid_id]);
+		allocator->grids[grid_id]->header.id = grid_id;
+		allocator->grid_stack[grid_id] = allocator->grids[grid_id];
 	}
 
-	queue->descriptor_size = GAO_PAGEALIGN((sizeof(struct gao_descriptor)*queue->full_descriptors.capacity));
-	queue->descriptor_ctx_size = GAO_PAGEALIGN((sizeof(struct gao_descriptor_context)*queue->full_descriptors.capacity));
-	queue->action_size = GAO_PAGEALIGN((sizeof(struct gao_action)*queue->full_descriptors.capacity));
+	spin_lock_init(&allocator->lock);
+	allocator->count = GAO_GRIDS;
 
-	queue->state = GAO_RESOURCE_STATE_REGISTERED;
+	log_debug("Successfully created grids.");
+	return 0;
+	err:
+	gao_dtor_grid_allocator(allocator);
+	return -ENOMEM;
+}
+
+static void gao_grid_return(struct gao_grid_allocator *allocator, struct gao_grid* grid) {
+
+	if(!allocator || !grid) {
+		log_bug("Null allocator or grid during grid return.");
+		return;
+	}
+
+	gao_lock_grid_allocator(allocator);
+
+	if(unlikely(allocator->count == GAO_GRIDS)) gao_bug("Already at max grids, cant return!");
+
+	allocator->grid_stack[allocator->count] = grid;
+	allocator->count++;
+
+	log_debug("Returned grid id %hu", grid->header.id);
+
+	err:
+	gao_unlock_grid_allocator(allocator);
+}
+
+static struct gao_grid* gao_grid_get(struct gao_grid_allocator *allocator) {
+	struct gao_grid* grid = NULL;
+
+	if(!allocator) return grid;
+
+	gao_lock_grid_allocator(allocator);
+
+	if(unlikely(!allocator->count)) gao_bug("Out of grids!");
+
+	allocator->count--;
+	grid = allocator->grid_stack[allocator->count];
+
+	log_debug("Got grid id %hu", grid->header.id);
+
+	err:
+	gao_unlock_grid_allocator(allocator);
+	return grid;
+}
+
+
+static void gao_free_rx_queue(struct gao_resources *resources, struct gao_rx_queue* queue) {
+	log_debug("Freeing rx queue");
+	if(queue) {
+		gao_empty_descriptors(&resources->descriptor_allocator, &queue->ring);
+		kfree(queue);
+	}
+}
+
+static struct gao_rx_queue* gao_create_rx_queue(struct gao_resources *resources, uint32_t order) {
+	struct gao_rx_queue *queue = NULL;
+	size_t	alloc_size;
+
+	if( (order > GAO_MAX_QUEUE_ORDER) || (order < GAO_MIN_QUEUE_ORDER) )
+		gao_error("Invalid rx queue order: %u", order);
+
+	log_debug("Creating rx queue with order %u", order);
+	alloc_size = (sizeof(struct gao_rx_queue) + ((1 << order)*sizeof(struct gao_descriptor)));
+	queue = kmalloc(alloc_size, GFP_KERNEL);
+	check_ptr(queue);
+
+	memset((void*)queue, 0, alloc_size);
+	spin_lock_init(&queue->lock);
+
+	queue->ring.capacity = (1 << order);
+	queue->ring.mask = (queue->ring.capacity - 1);
+	queue->ring.order = order;
+
+	gao_refill_descriptors(&resources->descriptor_allocator, &queue->ring);
+
+
 	return queue;
 	err:
 	gao_free_rx_queue(resources, queue);
 	return NULL;
 }
 
-
 static void gao_free_tx_queue(struct gao_resources *resources, struct gao_tx_queue* queue) {
-	log_debug("Deleting tx queue at %p", queue);
-
-
-	if(!queue) return;
-	gao_free_egress_subqueues(resources, queue);
-	gao_dtor_descriptor_list(resources, &queue->full_descriptors);
-	gao_dtor_descriptor_list(resources, &queue->empty_descriptors);
-
-	return;
+	log_debug("Freeing tx queue");
+	if(queue) {
+		gao_empty_descriptors(&resources->descriptor_allocator, &queue->ring);
+		kfree(queue);
+	}
 }
 
-static struct gao_tx_queue* gao_create_tx_queue(struct gao_resources *resources, uint64_t num_descriptors) {
-	struct gao_tx_queue* 	queue = NULL;
-	log_debug("Creating tx queue, size=%lu", (unsigned long)num_descriptors);
+static struct gao_tx_queue* gao_create_tx_queue(struct gao_resources *resources, uint32_t order) {
+	struct gao_tx_queue *queue = NULL;
+	size_t	alloc_size;
 
+	if( (order > GAO_MAX_QUEUE_ORDER) || (order < GAO_MIN_QUEUE_ORDER) )
+		gao_error("Invalid tx queue order: %u", order);
 
-	queue = vmalloc(sizeof(struct gao_tx_queue));
+	log_debug("Creating tx queue with order %u", order);
+	alloc_size = (sizeof(struct gao_rx_queue) + ((1 << order)*sizeof(struct gao_descriptor)));
+	queue = kmalloc(alloc_size, GFP_KERNEL);
 	check_ptr(queue);
-	memset((void*)queue, 0, sizeof(struct gao_tx_queue));
 
-	queue->descriptors = num_descriptors;
+	memset((void*)queue, 0, alloc_size);
 	spin_lock_init(&queue->lock);
 
+	queue->ring.capacity = (1 << order);
+	queue->ring.mask = (queue->ring.capacity - 1);
+	queue->ring.order = order;
 
-	if(gao_init_descriptor_list(resources, &queue->full_descriptors, num_descriptors))
-		gao_error("Failed to init full descriptors vector");
-	if(gao_init_descriptor_list(resources, &queue->empty_descriptors, num_descriptors))
-		gao_error("Failed to init empty descriptors vector");
-
-	queue->state = GAO_RESOURCE_STATE_REGISTERED;
 	return queue;
 	err:
 	gao_free_tx_queue(resources, queue);
 	return NULL;
 }
 
+void		gao_delete_port_queues(struct gao_resources *resources, struct gao_port *port) {
+	uint64_t i;
+	if(port) {
+		log_debug("Deleting port queues for port %llu", port->gao_ifindex);
 
-/**
- * From the perspective of a port that is being deleted, traverse all other ports and
- * null bindings to our egress queues.
- * @param resources
- * @param port
- */
-static void	gao_port_null_egress_to_ingress_queue_map(struct gao_resources *resources, struct gao_port *port) {
-	uint64_t	index = 0, subqueue_index;
-	struct gao_rx_queue *ingress_queue = NULL;
-	struct gao_port	 *other_port = NULL;
-
-	if(!port) gao_bug("Null port");
-	log_debug("Nulling queue maps destined to port %lu", (unsigned long)port->gao_ifindex);
-	//TODO: For now, just consider the case of SW to SW queuing. In the future, allow HW QOS passthrough
-	//and direct binding of HW queues to queue maps.
-
-
-	for(index = 0; index < GAO_MAX_PORTS; index++) {
-		other_port = &resources->ports[index];
-		if(other_port->state != GAO_RESOURCE_STATE_ACTIVE) continue;
-
-		ingress_queue = other_port->rx_queues[0];
-		if(!ingress_queue) {
-			log_bug("Ingress side queue on active port %lu missing.", (unsigned long)index);
-			continue;
+		for(i = 0; i < port->num_rx_queues; i++) {
+			if(port->rx_queues[i]) {
+				gao_free_rx_queue(resources, port->rx_queues[i]);
+			}
 		}
 
-		//Bind each subqueue on this queue to the other queue's map towards us
-		for(subqueue_index = 0; subqueue_index < GAO_MAX_PORT_SUBQUEUE; subqueue_index++) {
-
-			log_debug("Null port %lu queue %lu subqueue %lu ",
-					(unsigned long)other_port->gao_ifindex, (unsigned long)0, (unsigned long)subqueue_index);
-
-			ingress_queue->queue_map.port[port->gao_ifindex].ring[subqueue_index] = NULL;
+		for(i = 0; i < port->num_tx_queues; i++) {
+			if(port->tx_queues[i]) {
+				gao_free_tx_queue(resources, port->tx_queues[i]);
+			}
 		}
-
-
 	}
-
-
-	err:
-	return;
-}
-
-/**
- * Try to free a HW bound queue from a port. If the queue is bound to a file
- * it will only set the state and wake the file. The queue is unbound from the
- * port, but the file must then clean it up.
- * @warning Caller must hold resource lock
- * @param resources
- * @param queue
- */
-static void	gao_free_port_rx_queue(struct gao_resources *resources, struct gao_rx_queue* queue) {
-
-	if(!queue) gao_error("Cannot delete queue, pointer null.");
-
-	//Anyone using the queue now will finish
-	queue->state = GAO_RESOURCE_STATE_DELETING;
-	synchronize_rcu();
-
-	//FIXME: Wake any file potentially waiting on the queue
-	//queue->ring->header.head_wake_condition_ref
-
-	queue->binding.port = NULL;
-	queue->binding.gao_ifindex = 0;
-	queue->binding.queue_index = 0;
-	queue->binding.direction_txrx = GAO_DIRECTION_NONE;
-	queue->binding.owner_type = GAO_QUEUE_OWNER_NONE;
-	queue->hw_private = NULL;
-
-
-	//If it is bound to a file, don't delete it. The file will see the state on next file op and clean it up.
-	if(!queue->binding.gao_file) {
-		gao_free_rx_queue(resources, queue);
-	} else {
-		atomic_long_set(&queue->wake_cond, 1);
-		wake_up_interruptible(&queue->wait_queue);
-	}
-
-	err:
-	return;
-}
-
-
-/**
- * Try to free a HW bound queue from a port. If the queue is bound to a file
- * it will only set the state and wake the file. The queue is unbound from the
- * port, but the file must then clean it up.
- * @warning Caller must hold resource lock
- * @param resources
- * @param queue
- */
-static void	gao_free_port_tx_queue(struct gao_resources *resources, struct gao_tx_queue* queue) {
-	int		spinlock_retries = 5;
-	if(!queue) gao_error("Cannot delete queue, pointer null.");
-
-
-	queue->state = GAO_RESOURCE_STATE_DELETING;
-	queue->hw_private = NULL;
-
-	while(spinlock_retries--) {
-		if(spin_trylock(&queue->lock)) break;
-		log_debug("Failed to lock queue for deletion, retry: %d", spinlock_retries);
-		msleep(2);
-	}
-	if(!spinlock_retries) log_bug("Deleting tx_queue without lock. Danger Will Robinson.");
-
-
-	gao_free_tx_queue(resources, queue);
-
-	err:
-	return;
-}
-
-/**
- * Delete all the queues allocated to an interface.
- * If the queues were bound to a file, don't delete them, but remove references.
- * @warning Caller must hold resource lock
- * @param resources
- * @param interface
- */
-void	gao_delete_port_queues(struct gao_resources *resources, struct gao_port *port) {
-	uint64_t index;
-
-	struct gao_tx_queue *tx_queue = NULL;
-	struct gao_rx_queue *rx_queue = NULL;
-
-	//Remove references to our port from other ports.
-	gao_port_null_egress_to_ingress_queue_map(resources, port);
-	//Make sure nobody can be in the middle of transmitting these queues
-	//**This removes the requirement to check queue state in forwarding code (that is under RCU lock)
-	synchronize_rcu();
-
-
-
-	for(index = 0; index < port->num_rx_queues; index++) {
-		rx_queue = port->rx_queues[index];
-		if(!rx_queue) continue;
-		port->rx_queues[index] = NULL;
-		gao_free_port_rx_queue(resources, rx_queue);
-	}
-
-	for(index = 0; index < port->num_tx_queues; index++) {
-		tx_queue = port->tx_queues[index];
-		if(!tx_queue) continue;
-		port->tx_queues[index] = NULL;
-		gao_free_port_tx_queue(resources, tx_queue);
-	}
-
 
 }
 
-
-
-/**
- * From the perspective of one port, visit all other ports and bind our egress queues to their
- * queue maps.
- * @warning Caller must hold resource lock
- * @param resources
- * @param port
- * @return
- */
-static int64_t gao_port_bind_egress_to_ingress_queue_map(struct gao_resources *resources, struct gao_port *port) {
-	int64_t 	ret = 0;
-	uint64_t	index = 0, subqueue_index;
-	struct gao_tx_queue *egress_queue = NULL;
-	struct gao_rx_queue *ingress_queue = NULL;
-	struct gao_port	 *other_port = NULL;
-
-	if(!port) gao_bug_val(-EINVAL, "Null port");
-
-	//TODO: For now, just consider the case of SW to SW queuing. In the future, allow HW QOS passthrough
-	//and direct binding of HW queues to queue maps.
-
-	egress_queue = port->tx_queues[0];
-	if(!egress_queue) gao_bug_val(-EINVAL, "Null egress queue");
-
-
-	//Traverse the other ports
-	for(index = 0; index < GAO_MAX_PORTS; index++) {
-		other_port = &resources->ports[index];
-		//If its ourselves, also bind it
-		if( (other_port->state != GAO_RESOURCE_STATE_ACTIVE) && (other_port != port)) continue;
-
-		//For now visit just their default queue
-		ingress_queue = other_port->rx_queues[0];
-		if(!ingress_queue) {
-			log_bug("Ingress side queue on active port %lu missing.", (unsigned long)index);
-			continue;
-		}
-
-		//Bind each subqueue on this queue to the other queue's map towards us
-		for(subqueue_index = 0; subqueue_index < GAO_MAX_PORT_SUBQUEUE; subqueue_index++) {
-
-			log_debug("Bind port %lu queue %lu subqueue %lu > port %lu queue %lu subqueue %lu",
-					(unsigned long)port->gao_ifindex, (unsigned long)0, (unsigned long)subqueue_index,
-					(unsigned long)other_port->gao_ifindex, (unsigned long)0, (unsigned long)subqueue_index);
-
-			ingress_queue->queue_map.port[port->gao_ifindex].ring[subqueue_index] =
-					egress_queue->subqueues[subqueue_index].ring;
-		}
-
-	}
-
-
-
-
-	return 0;
-	err:
-	return ret;
-}
-
-/**
- * From the perspective of one port, traverse the other port's egress queues and bind their subqueues
- * to our queue map.
- * @warning Caller must hold resource lock
- * @param resources
- * @param port
- * @return
- */
-static int64_t gao_port_bind_ingress_to_egress_subqueues(struct gao_resources *resources, struct gao_port *port) {
-	int64_t	ret;
-	uint64_t index, subqueue_index;
-	struct gao_port *other_port = NULL;
-	struct gao_tx_queue *egress_queue = NULL;
-	struct gao_rx_queue *ingress_queue = NULL;
-
-	if(!port) gao_bug_val(-EINVAL, "Null port");
-
-	//TODO: For now, just consider the case of SW to SW queuing. In the future, allow HW QOS passthrough
-	//and direct binding of HW queues to queue maps.
-
-	ingress_queue = port->rx_queues[0];
-	if(!ingress_queue) gao_bug_val(-EINVAL, "Null egress queue");
-
-
-	for(index = 0; index < GAO_MAX_PORTS; index++) {
-		other_port = &resources->ports[index];
-		if(other_port->state != GAO_RESOURCE_STATE_ACTIVE) continue;
-
-		egress_queue = other_port->tx_queues[0];
-		if(!egress_queue) {
-			log_bug("Egress side queue on active port %lu missing.", (unsigned long)index);
-			continue;
-		}
-
-		for(subqueue_index = 0; subqueue_index < GAO_MAX_PORT_SUBQUEUE; subqueue_index++) {
-
-			log_debug("Bind port %lu queue %lu subqueue %lu > port %lu queue %lu subqueue %lu",
-					(unsigned long)other_port->gao_ifindex, (unsigned long)0, (unsigned long)subqueue_index,
-					(unsigned long)port->gao_ifindex, (unsigned long)0, (unsigned long)subqueue_index);
-
-			ingress_queue->queue_map.port[other_port->gao_ifindex].ring[subqueue_index] =
-					egress_queue->subqueues[subqueue_index].ring;
-
-
-		}
-
-	}
-
-	return 0;
-	err:
-	return ret;
-}
-
-
-/**
- * Create the subqueues for an egress queue.
- * @warning Caller must hold resource lock
- * @param resources
- * @param port
- */
-static int64_t gao_create_egress_subqueues(struct gao_resources *resources, struct gao_tx_queue *queue) {
+int64_t 	gao_create_port_queues(struct gao_resources* resources, struct gao_port *port) {
 	int64_t ret = 0;
-
-	//Create one default subqueue for now
-	ret = gao_create_egress_subqueue(resources, &queue->subqueues[0], queue->descriptors*2);
-	if(ret) gao_error("Failed to create subqueue. (ret=%ld)", (long)ret);
-
-	queue->subqueues[0].ring->control.tail_wake_condition_ref = &queue->active_subq;
+	uint64_t i = 0;
+	struct gao_rx_queue *rxq = NULL;
+	struct gao_tx_queue *txq = NULL;
 
 
-	return 0;
-	err:
-	gao_free_egress_subqueues(resources, queue);
-	return ret;
-}
-
-/**
- * Allocate and initialize queues for an activating interface.
- * @warning Caller must hold resource lock
- * @param resources
- * @param interface
- * @return 0 on success, -ENOMEM for insufficient resources.
- */
-int64_t gao_create_port_queues(struct gao_resources* resources, struct gao_port *port) {
-	int64_t ret = 0;
-	uint64_t index;
-	//uint64_t groups_required, queues_required, groups_rx_per_queue, groups_tx_per_queue;
-
-	struct gao_rx_queue* rx_queue = NULL;
-	struct gao_tx_queue* tx_queue = NULL;
-
-	//Sanity check the interface queue values, confirm enough resources
-	if(!port) gao_bug_val(-EFAULT, "Null Port");
+	if(!port)
+		gao_bug_val(-EINVAL, "Null port");
 
 	if(port->num_rx_queues > GAO_MAX_PORT_HWQUEUE || port->num_tx_queues > GAO_MAX_PORT_HWQUEUE)
-			gao_error_val(-ENOMEM, "Interface asking for too many queues! (%u/%u)", port->num_rx_queues, port->num_tx_queues);
+		gao_bug_val(-EINVAL, "Port requesting too many queues. (%u/%u)", port->num_rx_queues, port->num_tx_queues);
 
+	log_debug("Creating port queues for port %llu", port->gao_ifindex);
 
-	//Loop and allocate rx queues, assign pointers
-	for(index = 0; index < port->num_rx_queues; index++) {
-		rx_queue = gao_create_rx_queue(resources, port->num_rx_desc);
-		if(!rx_queue) gao_error_val(-ENOMEM, "Failed to alloc rx if queue idx %ld", (long)index);
+	for(i = 0; i < port->num_rx_queues; i++) {
+		rxq = gao_create_rx_queue(resources, GAO_DEFAULT_QUEUE_ORDER);
+		check_ptr(rxq);
+		port->rx_queues[i] = rxq;
+		//Fail if we don't get enough descriptors to fill the hardware queue on init.
+		if( (rxq->ring.avail - rxq->ring.use) < port->num_rx_desc ) {
+			gao_error_val(-ENOMEM, "Could not get enough descriptors to init port/q (%llu/%lld) needed/got (%u/%u)",
+					port->gao_ifindex, i, port->num_rx_desc, (rxq->ring.avail - rxq->ring.use));
+		}
 
-		rx_queue->index = index;
-		rx_queue->binding.owner_type = GAO_QUEUE_OWNER_PORT;
-		rx_queue->binding.direction_txrx = GAO_DIRECTION_RX;
-		rx_queue->binding.gao_ifindex = port->gao_ifindex;
-		rx_queue->binding.queue_index = index;
-		rx_queue->binding.port = port;
+		rxq->id = i;
+		rxq->port_id = port->gao_ifindex;
 
-
-
-		rx_queue->state = GAO_RESOURCE_STATE_ACTIVE;
-		port->rx_queues[index] = rx_queue;
+		rxq->state = GAO_RESOURCE_STATE_ACTIVE;
 	}
 
-	for(index = 0; index < port->num_tx_queues; index++) {
-		tx_queue = gao_create_tx_queue(resources, port->num_tx_desc);
-		if(!tx_queue) gao_error_val(-ENOMEM, "Failed to alloc tx if queue idx %ld", (long)index);
+	for(i = 0; i < port->num_tx_queues; i++) {
+		txq = gao_create_tx_queue(resources, GAO_DEFAULT_QUEUE_ORDER);
+		check_ptr(txq);
+		port->tx_queues[i] = txq;
 
-		gao_create_egress_subqueues(resources, tx_queue);
+		txq->id = i;
+		txq->port_id = port->gao_ifindex;
 
-		tx_queue->state = GAO_RESOURCE_STATE_ACTIVE;
-		port->tx_queues[index] = tx_queue;
-
+		txq->state = GAO_RESOURCE_STATE_ACTIVE;
 	}
 
-
-	//All queues created successfully, put them in other ports' queue maps.
-	ret = gao_port_bind_egress_to_ingress_queue_map(resources, port);
-	if(ret) gao_error("Failed to bind egress queues to other ports (ret=%llu)", ret);
-	//Get other ports' queues and put them in our map.
-	ret = gao_port_bind_ingress_to_egress_subqueues(resources, port);
-	if(ret) gao_error("Failed to bind other egress queues to this port (ret=%llu)", ret);
 
 
 	return 0;
@@ -1264,152 +699,17 @@ int64_t gao_create_port_queues(struct gao_resources* resources, struct gao_port 
 }
 
 
-/**
- * Userspace request to bind to a queue for forwarding tap.
- * @param resources
- * @param request
- * @return
- */
-int64_t	gao_bind_queue(struct file* filep, struct gao_request_queue *request) {
-	int64_t ret;
-	struct gao_file_private* gao_file = (struct gao_file_private*)filep->private_data;
-	struct gao_port *port = NULL;
-	struct gao_rx_queue *queue = NULL;
-	struct gao_resources* resources = gao_get_resources();
-
-	log_debug("File %p requesting to bind to if/q %llu/%llu", filep, request->gao_ifindex, request->queue_index);
-
-	gao_dump_file(filep);
-
-	gao_lock_resources(resources);
-
-	/*Error validation*/
-
-	//Are we ready and unbound?
-	if(gao_file->state != GAO_RESOURCE_STATE_REGISTERED) {
-		gao_error_val(-EBUSY, "File already registered to (if/q) %llu/%llu",
-				gao_file->bound_gao_ifindex, gao_file->bound_queue_index);
-	}
-
-	if(request->gao_ifindex >= GAO_MAX_PORTS) {
-		gao_error_val(-EINVAL, "Requested ifindex out of range. (want=%llu max=%lu)", request->gao_ifindex, (unsigned long)GAO_MAX_PORTS);
-	}
-
-	port = &resources->ports[request->gao_ifindex];
-
-	if(port->state != GAO_RESOURCE_STATE_ACTIVE)
-		gao_error_val(-EIO, "Port not in active state (state:%s)", gao_resource_state_string(port->state));
-
-	if(request->direction_txrx != GAO_DIRECTION_RX)
-		gao_error_val(-EINVAL, "Only RX binding supported right now.");
-
-	if(request->queue_index >= GAO_MAX_PORT_HWQUEUE || request->queue_index >= port->num_rx_queues)
-		gao_error_val(-EINVAL, "Requested queue index out of range.");
-
-	queue = port->rx_queues[request->queue_index];
-
-	if(!queue) gao_error_val(-EINVAL, "Queue does not exist.");
-
-	if(queue->binding.gao_file) gao_error_val(-EBUSY, "Queue already bound to a file.");
-
-	if(queue->state != GAO_RESOURCE_STATE_ACTIVE)
-		gao_error_val(-EIO, "Queue is not active. (state:%s)", gao_resource_state_string(queue->state));
-
-	//We're good, bind the port.
-	queue->binding.gao_file = gao_file;
-	gao_file->bound_gao_ifindex = request->gao_ifindex;
-	gao_file->bound_queue_index = request->queue_index;
-	gao_file->bound_direction = request->direction_txrx;
-	gao_file->bound_queue = queue;
-	gao_file->port_ops = port->port_ops;
-	gao_file->state = GAO_RESOURCE_STATE_ACTIVE;
-
-	request->queue_size = queue->full_descriptors.capacity;
-	request->descriptor_size = queue->descriptor_size;
-	request->descriptor_ctx_size = queue->descriptor_ctx_size;
-	request->action_size = queue->action_size;
-
-	//FIXME: Descriptor/Action mmap offsets
-//	request->action_pipeline_size = queue->action_pipeline_size;
-//	request->descriptor_pipeline_size = queue->descriptor_pipeline_size;
-//	request->queue_size = queue->ring->header.capacity;
-
-	//gao_file->port_ops->gao_disable_tx_interrupts()
-
-	gao_dump_file(filep);
-
-	log_debug("Successfully bound file %p to if/q %llu/%llu", filep, request->gao_ifindex, request->queue_index);
-
-	gao_unlock_resources(resources);
-	return 0;
-	err:
-	gao_unlock_resources(resources);
-	return ret;
-}
-
-void	gao_unbind_queue(struct file* filep) {
-	struct gao_file_private* gao_file = (struct gao_file_private*)filep->private_data;
-	struct gao_rx_queue *queue = NULL;
-	struct gao_resources* resources = gao_get_resources();
-
-	log_debug("File %p requesting to unbind.", filep);
-	gao_dump_file(filep);
-	gao_lock_resources(resources);
-
-	if(gao_file->state != GAO_RESOURCE_STATE_ACTIVE) {
-		gao_error("File not bound, cannot unbind.");
-	}
-
-	queue = gao_file->bound_queue;
-	if(!queue) gao_bug("File was active, but no queue pointer!");
-	queue->binding.gao_file = NULL;
-
-	log_debug("File %p requesting to unbind to if/q %llu/%llu", filep, gao_file->bound_gao_ifindex, gao_file->bound_queue_index);
-
-	gao_file->bound_direction = GAO_DIRECTION_NONE;
-	gao_file->bound_gao_ifindex = 0;
-	gao_file->bound_queue_index = 0;
-	gao_file->bound_queue = NULL;
-	gao_file->port_ops = NULL;
-	gao_file->state = GAO_RESOURCE_STATE_REGISTERED;
-
-
-	if(queue->state == GAO_RESOURCE_STATE_DELETING) {
-		log_debug("While unbinding file, queue was deleting. Finish deleting it.");
-		//Free port does a sync RCU
-		gao_free_port_rx_queue(resources, queue);
-	}
-
-	err:
-	gao_dump_file(filep);
-	gao_unlock_resources(resources);
-	return;
-}
 
 static void		gao_free_ports(struct gao_resources *resources) {
-	gao_controller_unregister_port(resources);
+
 }
 
 static int64_t	gao_init_ports(struct gao_resources *resources) {
 	resources->free_ports = GAO_MAX_PORTS;
-	//gao_controller_register_port(resources);
+
 	return 0;
 }
 
-/**
- * Returns the number of free slots (minus 1)
- * @param
- * @return
- */
-uint64_t	gao_ring_slots_left(struct gao_descriptor_ring* ring) {
-	return ((ring->header.capacity - CIRC_DIFF64(ring->header.write, ring->header.read, ring->header.capacity)) - 1);
-}
-EXPORT_SYMBOL(gao_ring_slots_left);
-
-uint64_t	gao_ring_num_elements(struct gao_descriptor_ring* ring) {
-	return CIRC_DIFF64(ring->header.write, ring->header.read, ring->header.capacity);
-}
-EXPORT_SYMBOL(gao_ring_num_elements);
 
 
 int		gao_lock_resources(struct gao_resources* resources) {
@@ -1424,13 +724,13 @@ EXPORT_SYMBOL(gao_lock_resources);
 
 void	gao_unlock_file(struct gao_file_private *gao_file) {
 	up(&gao_file->lock);
-	log_debug("Unlock GAO Filep bound to if/q %llu/%llu", gao_file->bound_gao_ifindex, gao_file->bound_queue_index);
+	//log_debug("Unlock GAO Filep bound to if/q %llu/%llu", gao_file->bound_gao_ifindex, gao_file->bound_queue_index);
 }
 
 
 int		gao_lock_file(struct gao_file_private *gao_file) {
 	int ret = 0;
-	log_debug("Trying to lock GAO Filep bound to if/q %llu/%llu", gao_file->bound_gao_ifindex, gao_file->bound_queue_index);
+	//log_debug("Trying to lock GAO Filep bound to if/q %llu/%llu", gao_file->bound_gao_ifindex, gao_file->bound_queue_index);
 	ret = down_interruptible(&gao_file->lock);
 	log_debug("Locked GAO Resources");
 	return ret;
@@ -1450,10 +750,47 @@ void	gao_free_resources(struct gao_resources *resources) {
 
 	gao_free_ports(resources);
 	gao_free_descriptor_allocator_ring(resources);
+	gao_dtor_grid_allocator(&resources->grid_allocator);
 	gao_free_buffers(resources);
 
 }
 
+void gao_ll_test(void) {
+	int		n1 = 1, n3 = 3, n4 = 4, n5 = 5;
+	struct gao_ll_cache *ll = gao_create_ll_cache(3);
+	int *ret;
+	log_debug("push 1 ret %d", gao_ll_push(ll, &n1));
+	log_debug("push 3 ret %d", gao_ll_push(ll, &n3));
+	log_debug("push 5 ret %d", gao_ll_push(ll, &n5));
+	log_debug("push 4 ret %d", gao_ll_push(ll, &n4));
+	ret = gao_ll_remove(ll);
+	if(ret) log_debug("remove ret %d", *ret);
+	else log_debug("remove returned null");
+
+	ret = gao_ll_remove(ll);
+	if(ret) log_debug("remove ret %d", *ret);
+	else log_debug("remove returned null");
+
+	ret = gao_ll_remove(ll);
+	if(ret) log_debug("remove ret %d", *ret);
+	else log_debug("remove returned null");
+
+	ret = gao_ll_remove(ll);
+	if(ret) log_debug("remove ret %d", *ret);
+	else log_debug("remove returned null");
+
+	log_debug("push 3 ret %d", gao_ll_push(ll, &n3));
+
+	ret = gao_ll_remove(ll);
+	if(ret) log_debug("remove ret %d", *ret);
+	else log_debug("remove returned null");
+
+	ret = gao_ll_remove(ll);
+	if(ret) log_debug("remove ret %d", *ret);
+	else log_debug("remove returned null");
+
+	gao_free_ll_cache(ll);
+}
 
 int64_t		gao_init_resources(struct gao_resources *resources) {
 	int64_t	ret;
@@ -1461,8 +798,6 @@ int64_t		gao_init_resources(struct gao_resources *resources) {
 
 	memset((void*)resources, 0, sizeof(struct gao_resources));
 
-	sema_init(&resources->allocation_lock, 1);
-	spin_lock_init(&resources->queue_lock);
 	sema_init(&resources->config_lock, 1);
 
 
@@ -1470,13 +805,16 @@ int64_t		gao_init_resources(struct gao_resources *resources) {
 
 	if( (ret = gao_init_descriptor_allocator_ring(resources)) ) goto err;
 
+	if(gao_init_grid_allocator(&resources->grid_allocator)) goto err;
+
 	if( (ret = gao_init_ports(resources)) ) goto err;
+
 
 
 	return 0;
 	err:
 	gao_free_resources(resources);
-	return ret;
+	return -1;
 }
 
 

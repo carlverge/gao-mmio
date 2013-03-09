@@ -65,8 +65,6 @@ static int gao_release(struct inode *inode, struct file *filep) {
 
 	//If we were bound to anything, remove the binding. If the queue was deleting,
 	//and we were the last reference, delete the queue.
-	gao_unbind_queue(filep);
-
 	kfree(filep->private_data);
 
 
@@ -86,10 +84,10 @@ static int gao_release(struct inode *inode, struct file *filep) {
 int gao_mmap(struct file* filep, struct vm_area_struct* vma) {
 	uint64_t 	requested_length = vma->vm_end - vma->vm_start;
 	struct gao_file_private	*gao_file = filep->private_data;
-	struct gao_rx_queue 		*queue = NULL;
+	//struct gao_rx_queue 		*queue = NULL;
 	unsigned long vm_addr, pfn, buffer_offset, buffer_addr, base_addr;
-	void*					queue_vm_addr;
-	uint64_t				page_index;
+	void*					grid_addr = NULL;
+	uint64_t				page_index, i;
 
 	//uint64_t 	buffer_length = ((uint64_t)GAO_BUFFER_GROUP_SIZE*(uint64_t)GAO_MAX_BUFFER_GROUPS);
 	int ret, index; //XXX: These should probably be int64_t ...
@@ -97,49 +95,24 @@ int gao_mmap(struct file* filep, struct vm_area_struct* vma) {
 	gao_lock_file(gao_file);
 
 
-	if(gao_file->bound_queue) {
-
-		log_debug("mmap: queue request for length %llu", requested_length);
-		queue = gao_file->bound_queue;
-
-		if(requested_length != (queue->descriptor_size + queue->descriptor_ctx_size + queue->action_size)) {
-			gao_error_val(-EINVAL,  "Userspace requested invalid mmap size: %llu, can only map: %ld",
-								requested_length, (queue->descriptor_size + queue->descriptor_ctx_size + queue->action_size));
-		}
+	if(requested_length == (sizeof(struct gao_grid)*GAO_GRIDS)) {
+		log_debug("Request for gridspace mapping.");
 
 		vm_addr = vma->vm_start;
 
-		log_debug("Mapping descriptors.");
-		queue_vm_addr = queue->full_descriptors.descriptors;
-		for(page_index = 0; page_index < queue->descriptor_size; page_index += PAGE_SIZE) {
-			pfn = vmalloc_to_pfn(queue_vm_addr + page_index);
-			ret = remap_pfn_range(vma, vm_addr, pfn, PAGE_SIZE, vma->vm_page_prot);
-			if(ret) gao_error("Failed to MMAP queue page to userspace: %d (addr %p)", ret, queue_vm_addr);
-			vm_addr += PAGE_SIZE;
+		for(i = 0; i < GAO_GRIDS; i++) {
+			grid_addr = resources.grid_allocator.grids[i];
+
+			//The grids are always evenly divisible by the pagesize
+			for(page_index = 0; page_index < (sizeof(struct gao_grid)/GAO_SMALLPAGE_SIZE); page_index++) {
+				pfn = vmalloc_to_pfn(grid_addr);
+				ret = vm_insert_page(vma, vm_addr + (page_index*GAO_SMALLPAGE_SIZE), pfn_to_page(pfn));
+				grid_addr += GAO_SMALLPAGE_SIZE;
+				vm_addr += GAO_SMALLPAGE_SIZE;
+			}
 		}
-
-		log_debug("Mapping descriptor contexts.");
-		queue_vm_addr = queue->full_descriptors.contexts;
-		for(page_index = 0; page_index < queue->descriptor_ctx_size; page_index += PAGE_SIZE) {
-			pfn = vmalloc_to_pfn(queue_vm_addr + page_index);
-			ret = remap_pfn_range(vma, vm_addr, pfn, PAGE_SIZE, vma->vm_page_prot);
-			if(ret) gao_error("Failed to MMAP queue context page to userspace: %d (addr %p)", ret, queue_vm_addr);
-			vm_addr += PAGE_SIZE;
-		}
-
-		log_debug("Mapping descriptor actions.");
-		queue_vm_addr = queue->actions;
-		for(page_index = 0; page_index < queue->action_size; page_index += PAGE_SIZE) {
-			pfn = vmalloc_to_pfn(queue_vm_addr + page_index);
-			ret = remap_pfn_range(vma, vm_addr, pfn, PAGE_SIZE, vma->vm_page_prot);
-			if(ret) gao_error("Failed to MMAP queue action page to userspace: %d (addr %p)", ret, queue_vm_addr);
-			vm_addr += PAGE_SIZE;
-		}
-
-
 
 	} else {
-
 		log_debug("mmap: buffer request for length %llu base addr %lx", requested_length, vma->vm_start);
 
 		if(requested_length != resources.buffer_space_frame) {
@@ -194,75 +167,8 @@ int gao_mmap(struct file* filep, struct vm_area_struct* vma) {
 	return ret;
 }
 
-static long gao_ioctl_dump(struct file *filep, unsigned long request_ptr) {
-	long ret = 0;
-	gao_request_dump_t type;
 
-	ret = copy_from_user(&type, (void*) request_ptr, sizeof(gao_request_dump_t));
-	if(ret) gao_error("Copy from user failed.");
 
-	switch(type) {
-	case GAO_REQUEST_DUMP_BUFFERS:
-		gao_dump_buffers(&resources);
-		break;
-	case GAO_REQUEST_DUMP_DESCRIPTORS:
-		gao_dump_descriptors(&resources);
-		break;
-	case GAO_REQUEST_DUMP_PORTS:
-		gao_dump_ports(&resources);
-		break;
-	case GAO_REQUEST_DUMP_PORTS_NESTED:
-		gao_dump_ports_nested(&resources);
-		break;
-	case GAO_REQUEST_DUMP_FILE:
-		gao_dump_file(filep);
-		break;
-	default:
-		log_debug("Unknown dump type.");
-		ret = -EINVAL;
-		break;
-	}
-
-	err:
-	return ret;
-}
-
-long gao_ioctl_handle_queue(struct file * filep, unsigned long request_ptr) {
-	long ret = 0;
-	struct gao_request_queue	*request = NULL;
-
-	request = kmalloc(sizeof(struct gao_request_queue), GFP_KERNEL);
-	check_ptr(request);
-
-	ret = copy_from_user(request, (void*) request_ptr, sizeof(struct gao_request_queue));
-	if(ret) gao_error("Copy from user failed.");
-
-	switch(request->request_code) {
-
-	case GAO_REQUEST_QUEUE_BIND:
-		ret = gao_bind_queue(filep, request);
-
-		if(ret) request->response_code = GAO_RESPONSE_QUEUE_NOK;
-		else request->response_code = GAO_RESPONSE_QUEUE_OK;
-
-		ret = copy_to_user((void*)request_ptr, request, sizeof(struct gao_request_queue));
-		if(ret) gao_error("Copy to user failed.");
-
-		break;
-
-	case GAO_REQUEST_QUEUE_UNBIND:
-		gao_unbind_queue(filep);
-		break;
-
-	default:
-		ret = -EINVAL;
-		break;
-	}
-
-	err:
-	if(request) kfree_null(request);
-	return ret;
-}
 
 
 long gao_ioctl_handle_port(struct file * filep, unsigned long request_ptr) {
@@ -346,9 +252,12 @@ static int64_t	gao_ioctl_handle_mmap(struct file *filep, unsigned long request_p
 	request = kmalloc(sizeof(struct gao_request_mmap), GFP_KERNEL);
 	if(!request) gao_error_val(-ENOMEM, "IOCTL failed, no memory!");
 
-	request->size = resources.buffer_space_frame;
+	request->bufferspace_size = resources.buffer_space_frame;
+	request->gridspace_size = sizeof(struct gao_grid)*GAO_GRIDS;
 	request->offset = resources.buffer_start_phys;
-	log_debug("IOCTL: Get MMAP request returns size=%lx offset=%lx", request->size, request->offset);
+	log_debug("IOCTL: Get MMAP request returns bufferspace_size=%lx gridspace_size=%lx offset=%lx",
+			request->bufferspace_size, request->gridspace_size, request->offset);
+
 	ret = copy_to_user((void*)request_ptr, request, sizeof(struct gao_request_mmap));
 	if(ret) gao_error("Copy to user failed.");
 
@@ -358,56 +267,54 @@ static int64_t	gao_ioctl_handle_mmap(struct file *filep, unsigned long request_p
 
 
 
+/**
+ * Kick off scheduling on all ports in the bitmap. If scheduling is already in progress,
+ * the port will be skipped. The port queues are chosen to be scheduled wrt the sport/queue.
+ * @param ports_to_schedule A bitmap of ports to schedule. The LSB is port index 1.
+ * @param sport The originating source port that is starting the scheduling.
+ * @param squeue
+ */
+//static void	gao_schedule_ports(uint64_t ports_to_schedule, uint64_t sport, uint64_t squeue) {
+//	uint64_t	next_port = GAO_FFSL(ports_to_schedule);
+//	for(;next_port;next_port = GAO_FFSL(ports_to_schedule)){
+//		if(unlikely(resources.ports[next_port].state == GAO_RESOURCE_STATE_UNUSED)) continue;
+//		resources.ports[next_port].port_scheduler(resources.ports[next_port].tx_queues[squeue]);
+//	}
+//
+//}
 
-inline static void gao_lock_subqueue(struct gao_descriptor_ring *ring) {
-	log_dp("Spinlocking ring");
-	spin_lock(&ring->control.tail_lock);
-	log_dp("Locked ring");
-}
 
-inline static void gao_unlock_subqueue(struct gao_descriptor_ring *ring) {
-	log_dp("Unlocking ring");
-	spin_unlock(&ring->control.tail_lock);
-}
-
-
-
-//static void	gao_forward_frames_old(struct gao_queue* queue, uint64_t num_to_forward) {
-//	struct gao_descriptor_ring	*dest_queue = NULL;
-//	struct gao_descriptor 	*descriptors = NULL;
+//static void	gao_forward_frames(struct gao_rx_queue* queue) {
+//	//struct gao_descriptor_ring	*dest_queue = NULL;
+//	struct gao_descriptor 	descriptor;
 //	struct gao_action 		*action = NULL;
-//	uint64_t				action_index, index, size, previous_wake_condition;
+//	struct gao_descriptor_subring *dest_queue = NULL;
+//	uint32_t	i, num_to_forward = queue->full_descriptors.count;
+//	uint64_t	ports_forwarded_to = 0;
 //
-//	//Initialize ring variables
-//	size = queue->ring->header.capacity;
-//	index = CIRC_NEXT(queue->ring->header.tail, size);
-//	descriptors = (struct gao_descriptor*)&queue->ring->descriptors;
 //
-//	log_dp("start fwd: index/next_to_clean=%llu left=%llu", index, num_to_forward);
+//	log_dp("start fwd: left=%u", num_to_forward);
 //
 //	//Main action apply loop
-//	for(action_index = 0; action_index < num_to_forward; action_index++, index = CIRC_NEXT(index, size)) {
+//	for(i = 0; i < num_to_forward; i++) {
 //
-//		action = &queue->action_pipeline[action_index];
+//		action = &queue->actions[i];
+//		descriptor = queue->full_descriptors.descriptors[i];
 //
-//		if(unlikely(action->action & GAO_INVALID_ACTION_MASK)) {
-//			log_bug("fwd drop: invalid action=%#08x", action->action);
-//			continue;
-//		}
 //
 //
 //		switch(action->action_id) {
 //
 //		case GAO_ACTION_DROP:
-//			log_error("fwd drop: action_id is drop");
-//			continue;
+//			log_dp("fwd drop: action_id is drop, refill empty to size=%u", queue->empty_descriptors.count);
+//			goto drop;
 //
 //		case GAO_ACTION_FWD:
 //			dest_queue = queue->queue_map.port[action->fwd.dport].ring[action->fwd.dqueue];
 //
 //			if(unlikely(!dest_queue)) {
-//				log_error("fwd drop: null dest queue");
-//				continue;
+//				log_dp("fwd drop: null dest queue, refill empty to size=%u", queue->empty_descriptors.count);
+//				goto drop;
 //			}
 //
 //			gao_lock_subqueue(dest_queue);
@@ -416,132 +323,42 @@ inline static void gao_unlock_subqueue(struct gao_descriptor_ring *ring) {
 //			if(!gao_ring_slots_left(dest_queue)) {
 //				log_error("fwd drop: no slots left");
 //				gao_unlock_subqueue(dest_queue);
-//				continue;
+//				goto drop;
 //			}
 //
-//			descriptors[index].offset = action->new_offset;
-//			descriptors[index].len = action->new_len;
+//			queue->full_descriptors.descriptors[i].offset = action->new_offset;
+//			queue->full_descriptors.descriptors[i].len = action->new_len;
 //
 //			//swap_descriptors(&descriptors[index], &dest_queue->descriptors[dest_queue->header.tail]);
-//			dest_queue->descriptors[dest_queue->header.tail] = descriptors[index];
-//			dest_queue->header.tail = CIRC_NEXT(dest_queue->header.tail, dest_queue->header.capacity);
+//			dest_queue->descriptors[dest_queue->header.tail] = queue->full_descriptors.descriptors[i];
+//			dest_queue->header.tail = (dest_queue->header.tail+1) & (dest_queue->header.capacity-1);
 //
 //			//Wake the endpoint
-//			previous_wake_condition = test_and_set_bit(action->fwd.dqueue, (unsigned long*)dest_queue->control.tail_wake_condition_ref);
+//			set_bit(action->fwd.dqueue, (unsigned long*)dest_queue->control.tail_wake_condition_ref);
+//			//Ports start at index 1, the bitfield is 1-indexed.
+//			ports_forwarded_to |= (1 << (action->fwd.dport-1));
 //
-//			log_dp("fwd: action_index=%llu port=%hhu queue=%hhu index=%llu new dest_tail=%llu prev_wake_cond=%llx",
-//					action_index, action->fwd.dport, action->fwd.dqueue, index, dest_queue->header.tail, previous_wake_condition);
-//
-//			if(!(previous_wake_condition & ~(1 << action->fwd.dqueue))) {
-//				wake_up_interruptible(dest_queue->control.tail_wait_queue_ref);
-//			}
-//
+//			log_dp("fwd: index=%u port=%hhu queue=%hhu desc_index=%u new dest_tail=%llu",
+//					i, action->fwd.dport, action->fwd.dqueue, queue->full_descriptors.descriptors[i].index, dest_queue->header.tail);
 //
 //			gao_unlock_subqueue(dest_queue);
 //			break;
 //
 //		default:
-//			log_bug("fwd drop: invalid action=%#04hhx", action->action_id);
-//			break;
+//			log_bug("fwd drop: invalid action=%#04hhx, refill empty to size=%u", action->action_id, queue->empty_descriptors.count);
+//			goto drop;
 //
+//		continue;
+//		drop:
+//		//Put the descriptor back in the empty list
+//		queue->empty_descriptors.descriptors[queue->empty_descriptors.count++] = descriptor;
 //		}
 //	}
 //
+//	gao_schedule_ports(ports_forwarded_to, queue->binding.port->gao_ifindex, queue->index);
+//
+//	queue->full_descriptors.count = 0;
 //}
-
-/**
- * Kick off scheduling on all ports in the bitmap. If scheduling is already in progress,
- * the port will be skipped. The port queues are chosen to be scheduled wrt the sport/queue.
- * @param ports_to_schedule A bitmap of ports to schedule. The LSB is port index 1.
- * @param sport The originating source port that is starting the scheduling.
- * @param squeue
- */
-static void	gao_schedule_ports(uint64_t ports_to_schedule, uint64_t sport, uint64_t squeue) {
-	uint64_t	next_port = GAO_FFSL(ports_to_schedule);
-	for(;next_port;next_port = GAO_FFSL(ports_to_schedule)){
-		if(unlikely(resources.ports[next_port].state == GAO_RESOURCE_STATE_UNUSED)) continue;
-		resources.ports[next_port].port_scheduler(resources.ports[next_port].tx_queues[squeue]);
-	}
-
-}
-
-
-static void	gao_forward_frames(struct gao_rx_queue* queue) {
-	//struct gao_descriptor_ring	*dest_queue = NULL;
-	struct gao_descriptor 	descriptor;
-	struct gao_action 		*action = NULL;
-	struct gao_descriptor_ring *dest_queue = NULL;
-	uint32_t	i, num_to_forward = queue->full_descriptors.count;
-	uint64_t	ports_forwarded_to = 0;
-
-
-	log_dp("start fwd: left=%u", num_to_forward);
-
-	//Main action apply loop
-	for(i = 0; i < num_to_forward; i++) {
-
-		action = &queue->actions[i];
-		descriptor = queue->full_descriptors.descriptors[i];
-
-
-
-		switch(action->action_id) {
-
-		case GAO_ACTION_DROP:
-			log_dp("fwd drop: action_id is drop, refill empty to size=%u", queue->empty_descriptors.count);
-			goto drop;
-
-		case GAO_ACTION_FWD:
-			dest_queue = queue->queue_map.port[action->fwd.dport].ring[action->fwd.dqueue];
-
-			if(unlikely(!dest_queue)) {
-				log_dp("fwd drop: null dest queue, refill empty to size=%u", queue->empty_descriptors.count);
-				goto drop;
-			}
-
-			gao_lock_subqueue(dest_queue);
-
-
-			if(!gao_ring_slots_left(dest_queue)) {
-				log_error("fwd drop: no slots left");
-				gao_unlock_subqueue(dest_queue);
-				goto drop;
-			}
-
-			queue->full_descriptors.descriptors[i].offset = action->new_offset;
-			queue->full_descriptors.descriptors[i].len = action->new_len;
-
-			//swap_descriptors(&descriptors[index], &dest_queue->descriptors[dest_queue->header.tail]);
-			dest_queue->descriptors[dest_queue->header.tail] = queue->full_descriptors.descriptors[i];
-			dest_queue->header.tail = (dest_queue->header.tail+1) & (dest_queue->header.capacity-1);
-
-			//Wake the endpoint
-			set_bit(action->fwd.dqueue, (unsigned long*)dest_queue->control.tail_wake_condition_ref);
-			//Ports start at index 1, the bitfield is 1-indexed.
-			ports_forwarded_to |= (1 << (action->fwd.dport-1));
-
-			log_dp("fwd: index=%u port=%hhu queue=%hhu desc_index=%u new dest_tail=%llu",
-					i, action->fwd.dport, action->fwd.dqueue, queue->full_descriptors.descriptors[i].index, dest_queue->header.tail);
-
-			gao_unlock_subqueue(dest_queue);
-			break;
-
-		default:
-			log_bug("fwd drop: invalid action=%#04hhx, refill empty to size=%u", action->action_id, queue->empty_descriptors.count);
-			goto drop;
-
-		continue;
-		drop:
-		//Put the descriptor back in the empty list
-		queue->empty_descriptors.descriptors[queue->empty_descriptors.count++] = descriptor;
-		}
-	}
-
-	gao_schedule_ports(ports_forwarded_to, queue->binding.port->gao_ifindex, queue->index);
-
-	queue->full_descriptors.count = 0;
-
-}
 
 //long	gao_sync_queue_old(struct file *filep) {
 //	ssize_t 				ret = 0;
@@ -630,293 +447,138 @@ static void	gao_forward_frames(struct gao_rx_queue* queue) {
 //}
 
 
-long	gao_sync_queue(struct file *filep) {
-	int64_t 				ret = 0;
-	struct gao_file_private *file_private = (struct gao_file_private*)filep->private_data;
-	struct gao_rx_queue 	*queue = NULL;
-	int32_t					total_rx;
+//long	gao_sync_queue(struct file *filep) {
+//	int64_t 				ret = 0;
+//	struct gao_file_private *file_private = (struct gao_file_private*)filep->private_data;
+//	struct gao_rx_queue 	*queue = NULL;
+//	int32_t					total_rx;
+//
+//	rcu_read_lock();
+//
+//	if(unlikely(file_private->state != GAO_RESOURCE_STATE_ACTIVE))
+//		gao_error_val(-EIO, "Cannot read from inactive queue");
+//
+//	queue = rcu_dereference(file_private->bound_queue);
+//
+//	if(unlikely(!queue))
+//		gao_error_val(-EIO, "Reading null queue");
+//
+//	if(unlikely(queue->state != GAO_RESOURCE_STATE_ACTIVE))
+//		gao_error_val(-EIO, "Cannot read from inactive queue");
+//
+//
+//	prefetch(((void*)&resources.descriptor_ring) + (64*0));
+//	prefetch(((void*)queue->empty_descriptors.descriptors) + (64*0));
+//	prefetch(((void*)queue->empty_descriptors.descriptors) + (64*1));
+//	prefetch(((void*)queue->empty_descriptors.descriptors) + (64*2));
+//	prefetch(((void*)queue->empty_descriptors.descriptors) + (64*3));
+//	prefetch(((void*)queue->empty_descriptors.descriptors) + (64*4));
+//	prefetch(((void*)queue->empty_descriptors.descriptors) + (64*5));
+//	prefetch(((void*)queue->empty_descriptors.descriptors) + (64*6));
+//	prefetch(((void*)queue->empty_descriptors.descriptors) + (64*7));
+//	prefetch(((void*)queue->full_descriptors.descriptors) + (64*0));
+//	prefetch(((void*)queue->full_descriptors.descriptors) + (64*1));
+//	prefetch(((void*)queue->full_descriptors.descriptors) + (64*2));
+//	prefetch(((void*)queue->full_descriptors.descriptors) + (64*3));
+//	prefetch(((void*)queue->full_descriptors.descriptors) + (64*0));
+//	prefetch(((void*)queue->actions) + (64*0));
+//	prefetch(((void*)queue->actions) + (64*1));
+//	prefetch(((void*)queue->actions) + (64*2));
+//	prefetch(((void*)queue->actions) + (64*3));
+//	prefetch(((void*)queue->shadow_ring) + (64*0));
+//	prefetch(((void*)queue->shadow_ring) + (64*1));
+//	prefetch(((void*)queue->shadow_ring) + (64*2));
+//	prefetch(((void*)queue->shadow_ring) + (64*3));
+//	prefetch(((void*)&resources.descriptor_ring.descriptors[resources.descriptor_ring.head]) + (64*0));
+//	prefetch(((void*)&resources.descriptor_ring.descriptors[resources.descriptor_ring.head]) + (64*1));
+//	prefetch(((void*)&resources.descriptor_ring.descriptors[resources.descriptor_ring.head]) + (64*2));
+//	prefetch(((void*)&resources.descriptor_ring.descriptors[resources.descriptor_ring.head]) + (64*3));
+//
+//	gao_forward_frames(queue);
+//	//file_private->port_ops->gao_clean(queue, num_to_forward);
+//
+//
+//	read_again:
+//	//Rx
+//	log_dp("rx recv: descriptors full size=%u capacity=%u", queue->full_descriptors.count, queue->full_descriptors.capacity);
+//	total_rx = file_private->port_ops->gao_recv(&queue->full_descriptors, queue->shadow_ring, queue->full_descriptors.capacity - queue->full_descriptors.count, queue->hw_private);
+//	if(unlikely(total_rx < 0)) gao_error_val(-EIO, "Error while reading fd %p", filep);
+//
+//
+//	//Clean
+//	if(queue->empty_descriptors.count < queue->descriptors) {
+//		log_dp("rx clean: refill descriptors empty size=%u capacity=%u", queue->empty_descriptors.count, queue->empty_descriptors.capacity);
+//		gao_refill_descriptors(&resources.descriptor_ring, &queue->empty_descriptors);
+//		log_dp("rx clean: refilled descriptors empty size=%u capacity=%u", queue->empty_descriptors.count, queue->empty_descriptors.capacity);
+//	}
+//
+//
+//	if(queue->empty_descriptors.count > 0) {
+//		file_private->port_ops->gao_clean(&queue->empty_descriptors, queue->shadow_ring, queue->empty_descriptors.count, queue->hw_private);
+//	}
+//
+//
+//
+//	if(queue->full_descriptors.count > 0) {
+//		//If we have outstanding descriptors, return the amount
+//		log_dp("rx done: descriptors full size=%u capacity=%u", queue->full_descriptors.count, queue->full_descriptors.capacity);
+//		rcu_read_unlock();
+//		return queue->full_descriptors.count;
+//	}
+//	else if(queue->empty_descriptors.count > 0) {
+//		//If there are no rx'd frames, but we have descriptors block on rx interrupt
+//		atomic_long_set(&queue->wake_cond, 0);
+//		file_private->port_ops->gao_enable_rx_interrupts(queue);
+//		if( wait_event_interruptible(queue->wait_queue, atomic_long_read(&queue->wake_cond) )) {
+//			ret = -EINTR;
+//			log_debug("Read on %p interrupted", filep);
+//			goto interrupted;
+//		}
+//
+//	}
+//	else {
+//		//We are starving -- no descriptors left to receive! Block on the descriptor ring.
+//	}
+//
+//
+//	rcu_read_lock();
+//	//Check the states again to make sure the queue is still valid.
+//	if(unlikely(file_private->state != GAO_RESOURCE_STATE_ACTIVE))
+//		gao_error_val(-EIO, "Cannot read from inactive queue");
+//
+//	if(unlikely(!queue))
+//		gao_error_val(-EIO, "Reading null queue");
+//
+//	if(unlikely(queue->state != GAO_RESOURCE_STATE_ACTIVE))
+//		gao_error_val(-EIO, "Cannot read from inactive queue");
+//
+//	file_private->port_ops->gao_disable_rx_interrupts(queue);
+//	goto read_again;
+//
+//
+//
+//
+//
+//
+//	err:
+//	rcu_read_unlock();
+//	interrupted:
+//	return ret;
+//}
 
-	rcu_read_lock();
 
-	if(unlikely(file_private->state != GAO_RESOURCE_STATE_ACTIVE))
-		gao_error_val(-EIO, "Cannot read from inactive queue");
 
-	queue = rcu_dereference(file_private->bound_queue);
 
-	if(unlikely(!queue))
-		gao_error_val(-EIO, "Reading null queue");
 
-	if(unlikely(queue->state != GAO_RESOURCE_STATE_ACTIVE))
-		gao_error_val(-EIO, "Cannot read from inactive queue");
 
 
-	prefetch(((void*)&resources.descriptor_ring) + (64*0));
-	prefetch(((void*)queue->empty_descriptors.descriptors) + (64*0));
-	prefetch(((void*)queue->empty_descriptors.descriptors) + (64*1));
-	prefetch(((void*)queue->empty_descriptors.descriptors) + (64*2));
-	prefetch(((void*)queue->empty_descriptors.descriptors) + (64*3));
-	prefetch(((void*)queue->empty_descriptors.descriptors) + (64*4));
-	prefetch(((void*)queue->empty_descriptors.descriptors) + (64*5));
-	prefetch(((void*)queue->empty_descriptors.descriptors) + (64*6));
-	prefetch(((void*)queue->empty_descriptors.descriptors) + (64*7));
-	prefetch(((void*)queue->full_descriptors.descriptors) + (64*0));
-	prefetch(((void*)queue->full_descriptors.descriptors) + (64*1));
-	prefetch(((void*)queue->full_descriptors.descriptors) + (64*2));
-	prefetch(((void*)queue->full_descriptors.descriptors) + (64*3));
-	prefetch(((void*)queue->full_descriptors.descriptors) + (64*0));
-	prefetch(((void*)queue->actions) + (64*0));
-	prefetch(((void*)queue->actions) + (64*1));
-	prefetch(((void*)queue->actions) + (64*2));
-	prefetch(((void*)queue->actions) + (64*3));
-	prefetch(((void*)queue->shadow_ring) + (64*0));
-	prefetch(((void*)queue->shadow_ring) + (64*1));
-	prefetch(((void*)queue->shadow_ring) + (64*2));
-	prefetch(((void*)queue->shadow_ring) + (64*3));
-	prefetch(((void*)&resources.descriptor_ring.descriptors[resources.descriptor_ring.head]) + (64*0));
-	prefetch(((void*)&resources.descriptor_ring.descriptors[resources.descriptor_ring.head]) + (64*1));
-	prefetch(((void*)&resources.descriptor_ring.descriptors[resources.descriptor_ring.head]) + (64*2));
-	prefetch(((void*)&resources.descriptor_ring.descriptors[resources.descriptor_ring.head]) + (64*3));
 
-	gao_forward_frames(queue);
-	//file_private->port_ops->gao_clean(queue, num_to_forward);
 
 
-	read_again:
-	//Rx
-	log_dp("rx recv: descriptors full size=%u capacity=%u", queue->full_descriptors.count, queue->full_descriptors.capacity);
-	total_rx = file_private->port_ops->gao_recv(&queue->full_descriptors, queue->shadow_ring, queue->full_descriptors.capacity - queue->full_descriptors.count, queue->hw_private);
-	if(unlikely(total_rx < 0)) gao_error_val(-EIO, "Error while reading fd %p", filep);
 
 
-	//Clean
-	if(queue->empty_descriptors.count < queue->descriptors) {
-		log_dp("rx clean: refill descriptors empty size=%u capacity=%u", queue->empty_descriptors.count, queue->empty_descriptors.capacity);
-		gao_refill_descriptors(&resources.descriptor_ring, &queue->empty_descriptors);
-		log_dp("rx clean: refilled descriptors empty size=%u capacity=%u", queue->empty_descriptors.count, queue->empty_descriptors.capacity);
-	}
 
 
-	if(queue->empty_descriptors.count > 0) {
-		file_private->port_ops->gao_clean(&queue->empty_descriptors, queue->shadow_ring, queue->empty_descriptors.count, queue->hw_private);
-	}
-
-
-
-	if(queue->full_descriptors.count > 0) {
-		//If we have outstanding descriptors, return the amount
-		log_dp("rx done: descriptors full size=%u capacity=%u", queue->full_descriptors.count, queue->full_descriptors.capacity);
-		rcu_read_unlock();
-		return queue->full_descriptors.count;
-	}
-	else if(queue->empty_descriptors.count > 0) {
-		//If there are no rx'd frames, but we have descriptors block on rx interrupt
-		atomic_long_set(&queue->wake_cond, 0);
-		file_private->port_ops->gao_enable_rx_interrupts(queue);
-		if( wait_event_interruptible(queue->wait_queue, atomic_long_read(&queue->wake_cond) )) {
-			ret = -EINTR;
-			log_debug("Read on %p interrupted", filep);
-			goto interrupted;
-		}
-
-	}
-	else {
-		//We are starving -- no descriptors left to receive! Block on the descriptor ring.
-	}
-
-
-	rcu_read_lock();
-	//Check the states again to make sure the queue is still valid.
-	if(unlikely(file_private->state != GAO_RESOURCE_STATE_ACTIVE))
-		gao_error_val(-EIO, "Cannot read from inactive queue");
-
-	if(unlikely(!queue))
-		gao_error_val(-EIO, "Reading null queue");
-
-	if(unlikely(queue->state != GAO_RESOURCE_STATE_ACTIVE))
-		gao_error_val(-EIO, "Cannot read from inactive queue");
-
-	file_private->port_ops->gao_disable_rx_interrupts(queue);
-	goto read_again;
-
-
-
-
-
-
-	err:
-	rcu_read_unlock();
-	interrupted:
-	return ret;
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/**
- * XXX: This is a hack, replace this if time permits.
- * Perform a "write" to a descriptor in the controller port Rx queue to give
- * userspace a descriptor with a certain length and offset to write to.
- * Right now only works on the controller port
- * @param frame_size The length to set the descriptor to.
- * @param offset The offset for the descriptor
- */
-ssize_t gao_write(struct file *filep, const char __user *action_buf, size_t num_frames, loff_t *offset) {
-	ssize_t 				ret = 0;
-	struct gao_file_private *gao_file = (struct gao_file_private*)filep->private_data;
-	struct gao_queue 		*queue = NULL;
-	struct gao_descriptor_ring_header	*header = NULL;
-	struct gao_descriptor 	*ring_descriptors = NULL, *mmap_descriptors = NULL;
-	uint64_t				index, size;
-
-	gao_lock_file(gao_file);
-
-	rcu_read_lock();
-
-	if(unlikely(gao_file->state != GAO_RESOURCE_STATE_ACTIVE))
-		gao_error_val(-EIO, "Cannot read from inactive queue");
-
-	//We can only write to the controller port
-	if(unlikely(gao_file->bound_gao_ifindex != GAO_CONTROLLER_PORT_ID))
-		gao_error_val(-EIO, "Cannot write to non-controller queue.");
-
-	queue = gao_file->bound_queue;
-
-	if(unlikely(!queue))
-		gao_error_val(-EIO, "Reading null queue");
-
-	if(unlikely(queue->state != GAO_RESOURCE_STATE_ACTIVE))
-		gao_error_val(-EIO, "Cannot read from inactive queue");
-
-	header = queue->hw_private;
-	if(unlikely(!header))
-		gao_bug_val(-EIO, "Queue had a null hw_private pointer.");
-
-
-	//Initialize ring variables
-	size = queue->ring->header.capacity;
-	index = header->head;
-	ring_descriptors = (struct gao_descriptor*)&queue->ring->descriptors;
-	mmap_descriptors = queue->descriptor_pipeline;
-	//Cap the number of injected frames to the ring capacity
-	num_frames = ((uint64_t)num_frames > (size - 1)) ? (size - 1) : num_frames;
-
-	for(index = 0; index < num_frames; index++) {
-		ring_descriptors[index].len = mmap_descriptors[index].len;
-	}
-
-	queue->ring->header.tail = size - 1;
-	queue->ring->header.head = num_frames;
-
-	log_dp("write: num_frames=%ld", num_frames);
-	ret = num_frames;
-
-	err:
-	gao_unlock_file(gao_file);
-	rcu_read_unlock();
-	return ret;
-}
-
-
-/**
- * Assumptions allowed:
- * 	Queue pointer and HW pointer are valid
- * 	Queue is not being deleted
- * 	It is safe to read the queue until we release RCU lock
- */
-ssize_t gao_read(struct file *filep, char __user *packet_buf, size_t packet_size, loff_t *offset) {
-	ssize_t ret = 0;
-	uint64_t size, packet_length;
-	struct gao_file_private *gao_file = (struct gao_file_private*)filep->private_data;
-	struct gao_queue *queue = NULL;
-	struct gao_descriptor *descriptors = NULL;
-	struct gao_descriptor_ring_header	*header = NULL;
-
-	gao_lock_file(gao_file);
-
-	read_again:
-
-	rcu_read_lock();
-
-	if(unlikely(gao_file->state != GAO_RESOURCE_STATE_ACTIVE))
-		gao_error_val(-EIO, "Cannot read from inactive queue");
-
-	//We can only write to the controller port
-	if(unlikely(gao_file->bound_gao_ifindex != GAO_CONTROLLER_PORT_ID))
-		gao_error_val(-EIO, "Cannot write to non-controller queue.");
-
-	//FIXME: I think I just gave my code cancer
-	queue = gao_get_resources()->ports[GAO_CONTROLLER_PORT_ID].tx_queues[0];
-
-	if(unlikely(!queue))
-		gao_error_val(-EIO, "Reading null queue");
-
-	if(unlikely(queue->state != GAO_RESOURCE_STATE_ACTIVE))
-		gao_error_val(-EIO, "Cannot read from inactive queue");
-
-	header = queue->hw_private;
-	if(unlikely(!header))
-		gao_bug_val(-EIO, "Queue had a null hw_private pointer.");
-
-
-	descriptors = (struct gao_descriptor*)&queue->ring->descriptors;
-	header = queue->hw_private;
-	size = queue->ring->header.capacity;
-
-
-	log_dp("start controller xmit/read: index/tail=%llu left=%ld", header->tail, atomic_long_read(queue->ring->control.head_wake_condition_ref));
-
-	//The condition acts like a semaphore in this case, if there are no packets wait for some
-	rcu_read_unlock(); //We can't be deleted while we're bound anyways, unlock before the wait and copy to user
-	if(!atomic_long_read(queue->ring->control.head_wake_condition_ref)) {
-		if(wait_event_interruptible( queue->ring->control.head_wait_queue, atomic_long_read(queue->ring->control.head_wake_condition_ref) )) {
-			ret = -EINTR;
-			log_debug("Read on %p interrupted", filep);
-			goto interrupted;
-		}
-		goto read_again;
-	}
-
-
-
-	//There are packets waiting
-	packet_length = descriptors[header->tail].len;
-	ret = copy_to_user( (void*)packet_buf, descriptor_to_virt_addr(descriptors[header->tail]), packet_length );
-
-	header->tail = CIRC_NEXT(header->tail, size);
-
-	//If there are no more packets left, wake xmit
-	if(atomic_long_dec_and_test(queue->ring->control.head_wake_condition_ref)) {
-		wake_up_interruptible(queue->ring->control.head_wait_queue_ref);
-	}
-
-
-	if(ret) {
-		ret = -EIO;
-	} else {
-		ret = packet_length;
-	}
-
-	gao_unlock_file(gao_file);
-	return ret;
-
-	err:
-	rcu_read_unlock();
-	interrupted:
-	gao_unlock_file(gao_file);
-	return ret;
-}
 
 
 /**
@@ -950,10 +612,6 @@ long gao_ioctl (struct file *filep, unsigned int command, unsigned long argument
 
 	switch(command) {
 
-	case GAO_IOCTL_SYNC_QUEUE:
-		ret = gao_sync_queue(filep);
-		break;
-
 	case GAO_IOCTL_COMMAND_GET_MMAP_SIZE:
 		ret = gao_ioctl_handle_mmap(filep, argument_ptr);
 		break;
@@ -961,16 +619,6 @@ long gao_ioctl (struct file *filep, unsigned int command, unsigned long argument
 	case GAO_IOCTL_COMMAND_PORT:
 		if(!argument_ptr) gao_error_val(-EFAULT, "IOCTL: Null argument pointer.");
 		ret = gao_ioctl_handle_port(filep, argument_ptr);
-		break;
-
-	case GAO_IOCTL_COMMAND_QUEUE:
-		if(!argument_ptr) gao_error_val(-EFAULT, "IOCTL: Null argument pointer.");
-		ret = gao_ioctl_handle_queue(filep, argument_ptr);
-		break;
-
-	case GAO_IOCTL_COMMAND_DUMP:
-		if(!argument_ptr) gao_error_val(-EFAULT, "IOCTL: Null argument pointer.");
-		gao_ioctl_dump(filep, argument_ptr);
 		break;
 
 	default:
@@ -987,8 +635,8 @@ long gao_ioctl (struct file *filep, unsigned int command, unsigned long argument
 static struct file_operations gao_fops = {
 	.owner	 = THIS_MODULE,
 	.mmap	 = gao_mmap,
-	.read	 = gao_read,
-	.write	 = gao_write,
+//	.read	 = gao_read,
+//	.write	 = gao_write,
 	.open	 = gao_open,
 	.release = gao_release,
 	.unlocked_ioctl = gao_ioctl,
