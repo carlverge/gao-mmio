@@ -143,9 +143,9 @@ void	gao_e1000e_init_tx_ring(struct e1000_ring *hw_ring, struct gao_tx_queue *ga
 void gao_e1000e_enable_rx_interrupts(struct gao_rx_queue* queue) {
 	struct e1000_adapter *adapter = queue->hw_private;
 	struct e1000_hw *hw = &adapter->hw;
-	//log_dp("Enabling RX interrupts");
+	log_dp("Enabling RX interrupts");
 	//Enable the RX Timer interrupt
-	ew32(IMS, (E1000_IMS_RXT0 | E1000_IMS_RXQ0 | E1000_IMS_OTHER | E1000_IMS_LSC));
+	ew32(IMS, (E1000_IMS_RXT0 | E1000_IMS_RXQ0 | E1000_IMS_RXDMT0 | E1000_IMS_OTHER | E1000_IMS_LSC));
 	e1e_flush();
 }
 
@@ -154,7 +154,7 @@ void gao_e1000e_enable_tx_interrupts(struct gao_tx_queue* queue) {
 	struct e1000_hw *hw = &adapter->hw;
 	//TODO: Set the TXD_LOW Interrupt, and set the Low thresh in the TXDCTL Reg
 	uint32_t flags = ( E1000_IMS_OTHER | E1000_IMS_LSC | E1000_IMS_TXDW | E1000_IMS_TXQ0 | E1000_IMS_TXQE | E1000_IMS_TXD_LOW);
-	//log_dp("Enabling TX interrupts");
+	log_dp("Enabling TX interrupts");
 	ew32(IMS, flags);
 	e1e_flush();
 	//log_debug("Ena TX IRQ IMS=%x IAM=%x", er32(IMS) ,er32(IAM));
@@ -164,7 +164,7 @@ void gao_e1000e_disable_rx_interrupts(struct gao_rx_queue* queue) {
 	struct e1000_adapter *adapter = queue->hw_private;
 	struct e1000_hw *hw = &adapter->hw;
 
-	//log_dp("Disabling RX Interrupts");
+	log_dp("Disabling RX Interrupts");
 	//Disable the interrupts
 	ew32(IMC, ( E1000_IMS_RXT0 | //RX Timer
 			E1000_IMS_RXO | //RX Overrun
@@ -180,7 +180,7 @@ void gao_e1000e_disable_tx_interrupts(struct gao_tx_queue* queue) {
 	struct e1000_adapter *adapter = queue->hw_private;
 	struct e1000_hw *hw = &adapter->hw;
 
-	//log_dp("Disabling TX Interrupts");
+	log_dp("Disabling TX Interrupts");
 	//Disable the interrupts
 	ew32(IMC, ( E1000_IMS_TXDW | //TX Desc Written Back
 			E1000_IMS_TXQE | //TX Queue Empty
@@ -194,19 +194,27 @@ void gao_e1000e_disable_tx_interrupts(struct gao_tx_queue* queue) {
 void gao_e1000e_handle_rx_irq(struct net_device* netdev, struct e1000_adapter *adapter, struct e1000_ring* hw_ring) {
 	struct e1000_hw	*hw = &adapter->hw;
 	//FIXME: gao_get_interface is too slow (scans interfaces)
-	struct gao_port* port = gao_get_port_from_ifindex(netdev->ifindex);
-	struct gao_rx_queue* gao_queue = NULL;
-	uint32_t icr = er32(ICR);
-	//log_dp("Handling RX ICR=%x", icr);
+//	struct gao_port* port = gao_get_port_from_ifindex(netdev->ifindex);
+//	struct gao_rx_queue* gao_queue = NULL;
+	uint32_t icr = er32(ICR);//, ims = er32(IMS);
+	log_dp("Handling RX ICR=%x", icr);
 
-	if(unlikely(!port)) goto err;
-	gao_queue = port->rx_queues[0];
-	if(unlikely(!gao_queue)) goto err;
+
+	if(icr & E1000_ICR_RXQ0) {
+		if(icr & E1000_ICR_RXDMT0) gao_rx_interrupt_threshold_handle(netdev->ifindex, 0);
+		if(icr & E1000_ICR_RXT0) gao_rx_interrupt_handle(netdev->ifindex, 0);
+	}
+
+
+
+
+//	if(unlikely(!port)) goto err;
+//	gao_queue = port->rx_queues[0];
+//	if(unlikely(!gao_queue)) goto err;
 
 //	atomic_long_set(&gao_queue->wake_cond, 1);
 //	wake_up_interruptible(&gao_queue->wait_queue);
 
-	err:
 	return;
 }
 
@@ -284,7 +292,7 @@ void	gao_e1000e_activate_port(struct net_device *netdev) {
 	gao_e1000e_init_rx_ring(adapter->rx_ring, port->rx_queues[0]);
 	gao_e1000e_init_tx_ring(adapter->tx_ring, port->tx_queues[0]);
 
-	gao_e1000e_disable_rx_interrupts(port->rx_queues[0]);
+	gao_e1000e_enable_rx_interrupts(port->rx_queues[0]);
 	gao_e1000e_disable_tx_interrupts(port->tx_queues[0]);
 
 

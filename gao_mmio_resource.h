@@ -17,6 +17,7 @@
 #include <linux/init.h>
 #include <linux/semaphore.h>
 #include <linux/spinlock.h>
+#include <linux/interrupt.h>
 
 #include <linux/types.h>
 #include <linux/if.h>
@@ -24,6 +25,7 @@
 
 #include <linux/bug.h>
 #include <linux/list.h>
+#include <linux/wait.h>
 
 #else
 #include <stdint.h>
@@ -216,17 +218,19 @@ static inline uint32_t	__gao_take_descriptors(struct gao_descriptor_allocator_ri
 	num_to_copy = (num_to_copy > (allocator->avail - allocator->use) ? (allocator->avail - allocator->use) : num_to_copy);
 	num_left = num_to_copy;
 
-	ring->use += num_to_copy; //pre-increment the index so we can unlock early
+	allocator->use += num_to_copy; //pre-increment the index so we can unlock early
 	log_debug("refill desc: use=%u avail=%u num_to_copy=%u", use, allocator->avail, num_to_copy);
 	gao_unlock_descriptor_ring(allocator);
 	//In theory, there should not be a case where descriptors are returned over us while we are copying
 	//because there should be a finite number of descriptors in the system.
 
 	while(num_left--) {
-		ring->desc[ring->avail & (ring->capacity-1)] = allocator->descriptors[use & (GAO_DESCRIPTORS-1)];
+		ring->desc[ring->avail & ring->mask] = allocator->descriptors[use & (GAO_DESCRIPTORS-1)];
 		ring->avail++, use++;
 	}
 
+
+	log_debug("refill desc: use=%u avail=%u copied=%u", use, allocator->avail, num_to_copy);
 	return num_to_copy;
 }
 
@@ -257,7 +261,8 @@ static inline void	__gao_release_descriptors(struct gao_descriptor_allocator_rin
 	//First lock to reserve return space
 	gao_lock_descriptor_allocator(allocator);
 
-	start_avail = avail = allocator->max_avail;
+	start_avail = allocator->max_avail;
+	avail = allocator->max_avail;
 
 	//The number of outstanding copies in progress by returners
 	allocator->return_delta += num_to_copy;
@@ -275,7 +280,7 @@ static inline void	__gao_release_descriptors(struct gao_descriptor_allocator_rin
 
 	//Perform the descriptor transfer
 	while(num_left--) {
-		allocator->descriptors[avail & (GAO_DESCRIPTORS-1)] = ring->desc[ring->forward & (ring->capacity-1)];
+		allocator->descriptors[avail & (GAO_DESCRIPTORS-1)] = ring->desc[ring->forward & ring->mask];
 		avail++, ring->forward++;
 	}
 
@@ -444,6 +449,38 @@ static inline void* gao_ll_remove(struct gao_ll_cache* cache) {
 }
 
 
+struct gao_queue_waitlist {
+	spinlock_t			lock;
+
+	uint32_t			rxq_cnt; //how many are waiting now
+	wait_queue_head_t	rxq_wait; //waitlist for userspace
+	struct gao_ll_cache	*rxq_list; //List of rx queues that need servicing
+
+};
+
+
+/**
+ * The fabric applies actions to descriptors. It will forward
+ * the descriptors to the appropriate queues and kick off schedulers
+ * if required.
+ *
+ * It contains a queue of grids that are pending forwarding. Because it
+ * runs on one CPU with only one instance, no locking is used for forwarding.
+ */
+struct gao_fabric {
+
+	struct tasklet_struct	task;
+
+	spinlock_t				lock; //Synchronizes the grid queue
+	uint32_t				avail; //Points past the last grid to forward (add them here)
+	uint32_t				use; //Points to next grid to forward (take them from here)
+	struct gao_grid*		grids[GAO_GRIDS];
+
+
+
+	//Descriptors to be returned to allocator (from drops/etc)
+	struct gao_descriptor_ring* free_desc;
+};
 
 
 struct gao_file_private {
@@ -455,13 +492,16 @@ struct gao_file_private {
 	gao_resource_state_t	state;
 	struct semaphore		lock; //Only permit one call to FD at once
 	struct file				*filep; //Backpointer
+	struct gao_grid			*grid;
+
+
+
+
 };
 
 struct gao_port_ops {
 	int64_t		(*gao_enable)(struct net_device*);
 	int64_t		(*gao_disable)(struct net_device*);
-	ssize_t		(*gao_read)(struct gao_file_private*, size_t size);
-	ssize_t		(*gao_write)(struct gao_file_private*, size_t size);
 	int32_t		(*gao_clean)(struct gao_descriptor_ring* ring, uint32_t num_to_clean, void *hw_private);
 	int32_t		(*gao_recv)(struct gao_descriptor_ring* ring, uint32_t num_to_read, void *hw_private);
 	int32_t		(*gao_xmit)(struct gao_descriptor_ring* ring, uint32_t num_to_xmit, void *hw_private);
@@ -533,8 +573,9 @@ struct gao_resources {
 
 	/*Queues*/
 	//struct gao_queue			*queues[GAO_MAX_QUEUES];
+	struct gao_queue_waitlist	waitlist;
 
-
+	struct gao_fabric			fabric;
 
 
 	/*Interfaces*/
@@ -577,6 +618,7 @@ struct gao_context {
 	void*			buffer_addr;
 	size_t			buffer_size;
 	unsigned long	buffer_offset; //Difference between addr of first buffer and address 0 in phys mem
+	unsigned long	phys_offset; //Difference between addr of first buffer and address 0 in phys mem
 	void*			grid_addr;
 	size_t			grid_size;
 	int				fd; //Used for control
@@ -635,6 +677,7 @@ struct gao_request_port {
 #define GAO_IOCTL_COMMAND_GET_MMAP_SIZE _IOWR(GAO_MAJOR_NUM, 0x10, struct gao_request_mmap)
 #define GAO_IOCTL_COMMAND_PORT _IOWR(GAO_MAJOR_NUM, 0x12, struct gao_request_port)
 #define GAO_IOCTL_SYNC_QUEUE	_IO(GAO_MAJOR_NUM, 0x14)
+#define GAO_IOCTL_READ_GRID		_IO(GAO_MAJOR_NUM, 0x15)
 
 
 #ifdef __KERNEL__
@@ -664,6 +707,9 @@ int64_t		gao_controller_register_port(struct gao_resources *resources);
 void		gao_unlock_file(struct gao_file_private *gao_file);
 int			gao_lock_file(struct gao_file_private *gao_file);
 
+void 		gao_grid_return(struct gao_grid_allocator *allocator, struct gao_grid* grid);
+struct gao_grid* gao_grid_get(struct gao_grid_allocator *allocator);
+
 /* Exported functions */
 int			gao_lock_resources(struct gao_resources* resources);
 void		gao_unlock_resources(struct gao_resources* resources);
@@ -675,10 +721,15 @@ void		gao_deactivate_port(struct gao_port* port);
 
 char*		gao_get_port_name(struct gao_port* port);
 
+void		gao_rx_interrupt_handle(int ifindex, uint32_t qid);
+void		gao_rx_interrupt_threshold_handle(int ifindex, uint32_t qid);
+
+void		gao_fabric_task(unsigned long);
+
 /* End of kernel-only functions */
 #endif
 
-static inline void* gao_descriptor_to_pkt(struct gao_descriptor descriptor, unsigned long offset) {
+static inline void* gao_desc_to_pkt(struct gao_descriptor descriptor, unsigned long offset) {
 	return (void*)(offset + GAO_DESC_TO_PHYS(descriptor));
 }
 

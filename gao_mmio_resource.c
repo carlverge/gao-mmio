@@ -9,7 +9,7 @@
 #endif
 
 #include <linux/delay.h>
-#include <linux/wait.h>
+
 #include <linux/rcupdate.h>
 #include <linux/mm.h>
 #include "gao_mmio_resource.h"
@@ -426,6 +426,7 @@ static int64_t	gao_init_descriptor_allocator_ring(struct gao_resources *resource
 	resources->descriptor_allocator.descriptors = descriptors;
 	resources->descriptor_allocator.use = 0;
 	resources->descriptor_allocator.avail = i;
+	resources->descriptor_allocator.max_avail = i;
 	spin_lock_init(&resources->descriptor_allocator.lock);
 
 	if(i != GAO_DESCRIPTORS)
@@ -492,6 +493,7 @@ static void	gao_dtor_grid_allocator(struct gao_grid_allocator *allocator) {
 
 	for(grid_id = 0; grid_id < GAO_GRIDS; grid_id++) {
 		gao_grid_free(allocator->grids[grid_id]);
+		allocator->grids[grid_id] = NULL;
 	}
 
 	return;
@@ -519,7 +521,7 @@ static int64_t	gao_init_grid_allocator(struct gao_grid_allocator *allocator) {
 	return -ENOMEM;
 }
 
-static void gao_grid_return(struct gao_grid_allocator *allocator, struct gao_grid* grid) {
+void gao_grid_return(struct gao_grid_allocator *allocator, struct gao_grid* grid) {
 
 	if(!allocator || !grid) {
 		log_bug("Null allocator or grid during grid return.");
@@ -539,7 +541,7 @@ static void gao_grid_return(struct gao_grid_allocator *allocator, struct gao_gri
 	gao_unlock_grid_allocator(allocator);
 }
 
-static struct gao_grid* gao_grid_get(struct gao_grid_allocator *allocator) {
+struct gao_grid* gao_grid_get(struct gao_grid_allocator *allocator) {
 	struct gao_grid* grid = NULL;
 
 	if(!allocator) return grid;
@@ -559,6 +561,49 @@ static struct gao_grid* gao_grid_get(struct gao_grid_allocator *allocator) {
 }
 
 
+static void gao_dtor_descriptor_ring(struct gao_descriptor_ring* ring) {
+
+}
+
+static int64_t gao_init_descriptor_ring(struct gao_descriptor_ring* ring, uint32_t order) {
+	memset((void*)ring, 0, ((1 << order)*sizeof(struct gao_descriptor)));
+
+	ring->capacity = (1 << order);
+	ring->mask = (ring->capacity - 1);
+	ring->order = order;
+
+	return 0;
+}
+
+static void gao_free_descriptor_ring(struct gao_descriptor_ring* ring) {
+	if(ring) {
+		gao_dtor_descriptor_ring(ring);
+		kfree(ring);
+	}
+}
+
+static  struct gao_descriptor_ring* gao_create_descriptor_ring(uint32_t order) {
+	struct gao_descriptor_ring* ring = NULL;
+	size_t	alloc_size;
+
+	if( (order > GAO_MAX_QUEUE_ORDER) || (order < GAO_MIN_QUEUE_ORDER) )
+		gao_error("Invalid descriptor ring order: %u", order);
+
+	alloc_size = ((1 << order)*sizeof(struct gao_descriptor));
+	log_debug("Creating descriptor ring with order %u, alloc size=%ldB", order, alloc_size);
+	ring = kmalloc(alloc_size, GFP_KERNEL);
+	check_ptr(ring);
+
+	if(gao_init_descriptor_ring(ring, order)) gao_error("Failed to init descriptor ring");
+
+	return ring;
+	err:
+	gao_free_descriptor_ring(ring);
+	return NULL;
+}
+
+
+
 static void gao_free_rx_queue(struct gao_resources *resources, struct gao_rx_queue* queue) {
 	log_debug("Freeing rx queue");
 	if(queue) {
@@ -574,20 +619,18 @@ static struct gao_rx_queue* gao_create_rx_queue(struct gao_resources *resources,
 	if( (order > GAO_MAX_QUEUE_ORDER) || (order < GAO_MIN_QUEUE_ORDER) )
 		gao_error("Invalid rx queue order: %u", order);
 
-	log_debug("Creating rx queue with order %u", order);
 	alloc_size = (sizeof(struct gao_rx_queue) + ((1 << order)*sizeof(struct gao_descriptor)));
+	log_debug("Creating rx queue with order %u, alloc size=%ldB", order, alloc_size);
 	queue = kmalloc(alloc_size, GFP_KERNEL);
 	check_ptr(queue);
 
 	memset((void*)queue, 0, alloc_size);
 	spin_lock_init(&queue->lock);
 
-	queue->ring.capacity = (1 << order);
-	queue->ring.mask = (queue->ring.capacity - 1);
-	queue->ring.order = order;
+	if(gao_init_descriptor_ring(&queue->ring, order)) gao_error("Failed ot init descriptor ring");
 
 	gao_refill_descriptors(&resources->descriptor_allocator, &queue->ring);
-
+	log_debug("Initial fill of ring got: use=%u avail=%u", queue->ring.use, queue->ring.avail);
 
 	return queue;
 	err:
@@ -618,9 +661,7 @@ static struct gao_tx_queue* gao_create_tx_queue(struct gao_resources *resources,
 	memset((void*)queue, 0, alloc_size);
 	spin_lock_init(&queue->lock);
 
-	queue->ring.capacity = (1 << order);
-	queue->ring.mask = (queue->ring.capacity - 1);
-	queue->ring.order = order;
+	if(gao_init_descriptor_ring(&queue->ring, order)) gao_error("Failed ot init descriptor ring");
 
 	return queue;
 	err:
@@ -633,18 +674,17 @@ void		gao_delete_port_queues(struct gao_resources *resources, struct gao_port *p
 	if(port) {
 		log_debug("Deleting port queues for port %llu", port->gao_ifindex);
 
-		for(i = 0; i < port->num_rx_queues; i++) {
-			if(port->rx_queues[i]) {
-				gao_free_rx_queue(resources, port->rx_queues[i]);
-			}
+		for(i = 0; i < GAO_MAX_PORT_HWQUEUE; i++) {
+			if(port->rx_queues[i]) gao_free_rx_queue(resources, port->rx_queues[i]);
+			port->rx_queues[i] = NULL;
 		}
 
-		for(i = 0; i < port->num_tx_queues; i++) {
-			if(port->tx_queues[i]) {
-				gao_free_tx_queue(resources, port->tx_queues[i]);
-			}
+		for(i = 0; i < GAO_MAX_PORT_HWQUEUE; i++) {
+			if(port->tx_queues[i]) gao_free_tx_queue(resources, port->tx_queues[i]);
+			port->tx_queues[i] = NULL;
 		}
 	}
+
 
 }
 
@@ -663,13 +703,19 @@ int64_t 	gao_create_port_queues(struct gao_resources* resources, struct gao_port
 
 	log_debug("Creating port queues for port %llu", port->gao_ifindex);
 
+
+	for(i = 0; i < GAO_MAX_PORT_HWQUEUE; i++) {
+		port->rx_queues[i] = NULL;
+		port->tx_queues[i] = NULL;
+	}
+
 	for(i = 0; i < port->num_rx_queues; i++) {
 		rxq = gao_create_rx_queue(resources, GAO_DEFAULT_QUEUE_ORDER);
 		check_ptr(rxq);
 		port->rx_queues[i] = rxq;
 		//Fail if we don't get enough descriptors to fill the hardware queue on init.
 		if( (rxq->ring.avail - rxq->ring.use) < port->num_rx_desc ) {
-			gao_error_val(-ENOMEM, "Could not get enough descriptors to init port/q (%llu/%lld) needed/got (%u/%u)",
+			log_error("Could not get enough descriptors to init port/q (%llu/%lld) needed/got (%u/%u)",
 					port->gao_ifindex, i, port->num_rx_desc, (rxq->ring.avail - rxq->ring.use));
 		}
 
@@ -698,6 +744,53 @@ int64_t 	gao_create_port_queues(struct gao_resources* resources, struct gao_port
 	return ret;
 }
 
+static void		gao_dtor_queue_waitlist(struct gao_queue_waitlist *waitlist) {
+	if(waitlist) {
+		if(waitlist->rxq_list) gao_free_ll_cache(waitlist->rxq_list);
+	}
+}
+
+static int64_t	gao_init_queue_waitlist(struct gao_queue_waitlist *waitlist) {
+
+	spin_lock_init(&waitlist->lock);
+
+	waitlist->rxq_list = gao_create_ll_cache(256);
+	check_ptr(waitlist->rxq_list);
+	waitlist->rxq_cnt = 0;
+	init_waitqueue_head(&waitlist->rxq_wait);
+
+	return 0;
+	err:
+	gao_dtor_queue_waitlist(waitlist);
+	return -ENOMEM;
+}
+
+static void gao_dtor_fabric(struct gao_fabric *fabric) {
+	log_debug("Destroying fabric.");
+
+	//Not returning descriptors here because the module is exiting.
+	if(fabric->free_desc) gao_free_descriptor_ring(fabric->free_desc);
+
+	log_debug("Killing fabric task.");
+	tasklet_kill(&fabric->task);
+
+}
+
+static int64_t	gao_init_fabric(struct gao_fabric *fabric) {
+	log_debug("Initializing fabric. Mmmm. Soft.");
+
+	memset((void*)fabric, 0, sizeof(struct gao_fabric));
+
+	fabric->free_desc = gao_create_descriptor_ring(GAO_GRID_ORDER);
+	check_ptr(fabric->free_desc);
+
+	tasklet_init(&fabric->task, gao_fabric_task, 0);
+
+	return 0;
+	err:
+	gao_dtor_fabric(fabric);
+	return -ENOMEM;
+}
 
 
 static void		gao_free_ports(struct gao_resources *resources) {
@@ -748,9 +841,11 @@ EXPORT_SYMBOL(gao_unlock_resources);
 void	gao_free_resources(struct gao_resources *resources) {
 	log_debug("Start free resources.");
 
+	gao_dtor_fabric(&resources->fabric);
 	gao_free_ports(resources);
-	gao_free_descriptor_allocator_ring(resources);
+	gao_dtor_queue_waitlist(&resources->waitlist);
 	gao_dtor_grid_allocator(&resources->grid_allocator);
+	gao_free_descriptor_allocator_ring(resources);
 	gao_free_buffers(resources);
 
 }
@@ -793,22 +888,23 @@ void gao_ll_test(void) {
 }
 
 int64_t		gao_init_resources(struct gao_resources *resources) {
-	int64_t	ret;
 	log_debug("Start initialize resources.");
 
 	memset((void*)resources, 0, sizeof(struct gao_resources));
 
 	sema_init(&resources->config_lock, 1);
 
+	if(gao_init_buffer_groups(resources)) goto err;
 
-	if( (ret = gao_init_buffer_groups(resources)) ) goto err;
-
-	if( (ret = gao_init_descriptor_allocator_ring(resources)) ) goto err;
+	if(gao_init_descriptor_allocator_ring(resources)) goto err;
 
 	if(gao_init_grid_allocator(&resources->grid_allocator)) goto err;
 
-	if( (ret = gao_init_ports(resources)) ) goto err;
+	if(gao_init_queue_waitlist(&resources->waitlist)) goto err;
 
+	if(gao_init_ports(resources)) goto err;
+
+	if(gao_init_fabric(&resources->fabric)) goto err;
 
 
 	return 0;
