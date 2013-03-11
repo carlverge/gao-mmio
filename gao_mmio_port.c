@@ -15,10 +15,6 @@
 #define CONFIG_HZ 1000
 #endif
 
-const static char *gao_resource_state_str[] = {"Unused", "Registered", "Active", "Configuring", "Deleting"};
-//const static char *gao_owner_str[] = {"None", "Userspace", "Interface"};
-//const static char *gao_direction_str[] = {"NA", "RX", "TX"};
-
 
 
 void	gao_unregister_port(struct net_device *netdev) {
@@ -27,7 +23,7 @@ void	gao_unregister_port(struct net_device *netdev) {
 
 	gao_lock_resources(resources);
 
-	port = gao_get_port_from_ifindex(netdev->ifindex);
+	port = gao_ifindex_to_port(netdev->ifindex);
 	if(!port) gao_error("Cannot unregister interface -- already unregistered: %s[%d]", netdev->name, netdev->ifindex);
 
 	log_debug("Unegistering interface %s, kifindex %d, ifindex %lu", netdev->name, netdev->ifindex, (unsigned long)port->gao_ifindex);

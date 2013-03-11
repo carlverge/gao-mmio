@@ -26,6 +26,7 @@
 #include <linux/bug.h>
 #include <linux/list.h>
 #include <linux/wait.h>
+#include <linux/atomic.h>
 
 #else
 #include <stdint.h>
@@ -159,6 +160,15 @@ GAO_STATIC_ASSERT((sizeof(struct gao_descriptor[GAO_GRID_SIZE]) % GAO_SMALLPAGE_
 #ifdef __KERNEL__
 
 
+#define GAO_VALIDATE_DESC_ON 1
+#ifdef GAO_VALIDATE_DESC_ON
+#define GAO_VALIDATE_DESC(DESC) do {\
+	__gao_validate_desc(DESC);\
+	} while(0)
+#else
+#define GAO_VALIDATE_DESC(DESC)
+#endif
+static inline void __gao_validate_desc(struct gao_descriptor);
 
 
 //Power of 2 circular buffer, absolute indicies.
@@ -187,16 +197,24 @@ struct gao_descriptor_allocator_ring {
 };
 
 
-static inline void gao_lock_descriptor_allocator(struct gao_descriptor_allocator_ring *ring) {
-	log_debug("Spinlocking descriptor ring");
-	spin_lock(&ring->lock);
-	log_debug("Locked descriptor ring");
+static inline void __gao_lock_descriptor_allocator(struct gao_descriptor_allocator_ring *ring) {
+	spin_lock_bh(&ring->lock);
 }
+#define gao_lock_descriptor_allocator(x) do {\
+	log_lock("lock desc ring");\
+	__gao_lock_descriptor_allocator(x);\
+	log_lock("locked desc ring");\
+	} while(0)
 
-static inline void gao_unlock_descriptor_ring(struct gao_descriptor_allocator_ring *ring) {
-	log_debug("Unlocking descriptor ring");
-	spin_unlock(&ring->lock);
+static inline void __gao_unlock_descriptor_ring(struct gao_descriptor_allocator_ring *ring) {
+	spin_unlock_bh(&ring->lock);
 }
+#define gao_unlock_descriptor_ring(x) do {\
+	log_lock("unlock desc ring");\
+	__gao_unlock_descriptor_ring(x);\
+	} while(0)
+
+
 
 /**
  * Refill the descriptor ring starting at avail. Will get num_to_copy
@@ -225,12 +243,13 @@ static inline uint32_t	__gao_take_descriptors(struct gao_descriptor_allocator_ri
 	//because there should be a finite number of descriptors in the system.
 
 	while(num_left--) {
+		GAO_VALIDATE_DESC(allocator->descriptors[use & (GAO_DESCRIPTORS-1)]);
 		ring->desc[ring->avail & ring->mask] = allocator->descriptors[use & (GAO_DESCRIPTORS-1)];
 		ring->avail++, use++;
 	}
 
 
-	log_debug("refill desc: use=%u avail=%u copied=%u", use, allocator->avail, num_to_copy);
+	log_debug("refill desc: use=%u avail=%u copied=%u total_desc=%u", use, allocator->avail, num_to_copy, allocator->avail - allocator->use);
 	return num_to_copy;
 }
 
@@ -280,6 +299,7 @@ static inline void	__gao_release_descriptors(struct gao_descriptor_allocator_rin
 
 	//Perform the descriptor transfer
 	while(num_left--) {
+		GAO_VALIDATE_DESC(ring->desc[ring->forward & ring->mask]);
 		allocator->descriptors[avail & (GAO_DESCRIPTORS-1)] = ring->desc[ring->forward & ring->mask];
 		avail++, ring->forward++;
 	}
@@ -297,7 +317,8 @@ static inline void	__gao_release_descriptors(struct gao_descriptor_allocator_rin
 		//So advance the avail up what we transferred.
 		allocator->avail = avail;
 	}
-	log_debug("return desc done: avail=%u max_avail=%u num_to_copy=%u delta=%u", allocator->avail, allocator->max_avail, num_to_copy, allocator->return_delta);
+	log_debug("return desc done: use=%u avail=%u max_avail=%u num_to_copy=%u delta=%u total_desc=%u",
+			allocator->use, allocator->avail, allocator->max_avail, num_to_copy, allocator->return_delta, allocator->avail - allocator->use);
 	gao_unlock_descriptor_ring(allocator);
 
 	return;
@@ -309,7 +330,7 @@ static inline void	__gao_release_descriptors(struct gao_descriptor_allocator_rin
  * @param allocator
  * @param ring
  */
-static inline void gao_release_descriptors(struct gao_descriptor_allocator_ring *allocator, struct gao_descriptor_ring* ring) {
+static inline void gao_return_descriptors(struct gao_descriptor_allocator_ring *allocator, struct gao_descriptor_ring* ring) {
 	__gao_release_descriptors(allocator, ring, (ring->clean - ring->forward));
 }
 
@@ -338,6 +359,8 @@ struct gao_rx_queue {
 	gao_resource_state_t	state;
 	spinlock_t				lock;
 
+	uint16_t				starving; //If set, the queue ran out of descriptors and needs a kickoff again
+	uint16_t				pending_read; //The queue has descriptors pending read
 	//Pointer for drivers to store rings/adapter structs for quick access
 	void					*hw_private;
 
@@ -452,7 +475,8 @@ static inline void* gao_ll_remove(struct gao_ll_cache* cache) {
 struct gao_queue_waitlist {
 	spinlock_t			lock;
 
-	uint32_t			rxq_cnt; //how many are waiting now
+	uint32_t			is_blocking;
+
 	wait_queue_head_t	rxq_wait; //waitlist for userspace
 	struct gao_ll_cache	*rxq_list; //List of rx queues that need servicing
 
@@ -505,10 +529,10 @@ struct gao_port_ops {
 	int32_t		(*gao_clean)(struct gao_descriptor_ring* ring, uint32_t num_to_clean, void *hw_private);
 	int32_t		(*gao_recv)(struct gao_descriptor_ring* ring, uint32_t num_to_read, void *hw_private);
 	int32_t		(*gao_xmit)(struct gao_descriptor_ring* ring, uint32_t num_to_xmit, void *hw_private);
-	void		(*gao_enable_rx_interrupts)(struct gao_rx_queue*);
-	void		(*gao_enable_tx_interrupts)(struct gao_tx_queue*);
-	void		(*gao_disable_rx_interrupts)(struct gao_rx_queue*);
-	void		(*gao_disable_tx_interrupts)(struct gao_tx_queue*);
+	void		(*gao_enable_rx_intr)(struct gao_rx_queue*);
+	void		(*gao_enable_tx_intr)(struct gao_tx_queue*);
+	void		(*gao_disable_rx_intr)(struct gao_rx_queue*);
+	void		(*gao_disable_tx_intr)(struct gao_tx_queue*);
 };
 
 
@@ -595,16 +619,23 @@ static inline void* gao_descriptor_to_virt_addr(struct gao_descriptor descriptor
 	return GAO_DESC_TO_VIRT(descriptor);
 }
 
-static inline void gao_lock_grid_allocator(struct gao_grid_allocator *allocator) {
-	log_debug("Spinlocking grid allocator");
-	spin_lock(&allocator->lock);
-	log_debug("Locked grid allocator");
-}
 
-static inline void gao_unlock_grid_allocator(struct gao_grid_allocator *allocator) {
-	log_debug("Unlocking grid allocator");
-	spin_unlock(&allocator->lock);
+static inline void __gao_lock_grid_allocator(struct gao_grid_allocator *allocator) {
+	spin_lock_bh(&allocator->lock);
 }
+#define gao_lock_grid_allocator(x) do {\
+	log_lock("lock grid allocator");\
+	__gao_lock_grid_allocator(x);\
+	log_lock("locked grid allocator");\
+	} while(0)
+
+static inline void __gao_unlock_grid_allocator(struct gao_grid_allocator *allocator) {
+	spin_unlock_bh(&allocator->lock);
+}
+#define gao_unlock_grid_allocator(x) do {\
+	log_lock("unlock grid allocator");\
+	__gao_unlock_grid_allocator(x);\
+	} while(0)
 
 
 
@@ -676,21 +707,58 @@ struct gao_request_port {
 #define GAO_MAJOR_NUM	0x10
 #define GAO_IOCTL_COMMAND_GET_MMAP_SIZE _IOWR(GAO_MAJOR_NUM, 0x10, struct gao_request_mmap)
 #define GAO_IOCTL_COMMAND_PORT _IOWR(GAO_MAJOR_NUM, 0x12, struct gao_request_port)
-#define GAO_IOCTL_SYNC_QUEUE	_IO(GAO_MAJOR_NUM, 0x14)
-#define GAO_IOCTL_READ_GRID		_IO(GAO_MAJOR_NUM, 0x15)
+#define GAO_IOCTL_RECV_GRID		_IO(GAO_MAJOR_NUM, 0x15)
+#define GAO_IOCTL_SEND_GRID		_IO(GAO_MAJOR_NUM, 0x16)
+#define GAO_IOCTL_EXCH_GRID		_IO(GAO_MAJOR_NUM, 0x17)
 
 
 #ifdef __KERNEL__
 /* Kernel-only functions */
-inline struct gao_resources*	gao_get_resources(void);
-inline struct gao_port* 	gao_get_port_from_ifindex(int ifindex);
+extern struct gao_resources gao_global_resources;
+
+static inline struct gao_resources*	gao_get_resources(void) {
+	return &gao_global_resources;
+}
+static inline struct gao_port* gao_ifindex_to_port(int ifindex) {
+	if(unlikely((unsigned int)ifindex >= GAO_MAX_IFINDEX)) return NULL;
+	else return gao_global_resources.ifindex_to_port_lut[ifindex];
+}
+
+static inline void __gao_validate_desc(struct gao_descriptor desc) {
+	if(unlikely(
+			((desc.index) < (gao_global_resources.buffer_start_phys >> GAO_BFN_SHIFT)) ||
+			((desc.index) >= (gao_global_resources.buffer_end_phys >> GAO_BFN_SHIFT))
+			)) {
+		log_fatal("DESCRIPTOR GOOF: INVALID DESCRIPTOR INDEX %08x (%lx <-> %lx)",\
+			desc.index, gao_global_resources.buffer_start_phys, gao_global_resources.buffer_end_phys);\
+		WARN_ON(1);
+	}
+}
+
 
 void 		gao_free_port_list(struct gao_request_port_list* list);
 struct gao_request_port_list* gao_get_port_list(struct gao_resources* resources);
 void		gao_free_port_info(struct gao_request_port_info* info);
 struct gao_request_port_info* gao_get_port_info(struct gao_resources* resources, uint64_t gao_ifindex);
 
-const char*	gao_resource_state_string(gao_resource_state_t state);
+
+static inline const char*	gao_resource_state_string(gao_resource_state_t state) {
+	switch(state) {
+	case GAO_RESOURCE_STATE_UNUSED:
+		return "Unused";
+	case GAO_RESOURCE_STATE_REGISTERED:
+		return "Registered";
+	case GAO_RESOURCE_STATE_ACTIVE:
+		return "Active";
+	default:
+		return "Invalid State";
+	}
+}
+
+void		__gao_dump_resources(struct gao_resources* resources);
+static inline void gao_dump_resources(void) {
+	__gao_dump_resources(&gao_global_resources);
+}
 
 void		gao_free_resources(struct gao_resources* resources);
 int64_t		gao_init_resources(struct gao_resources* resources);
@@ -722,7 +790,7 @@ void		gao_deactivate_port(struct gao_port* port);
 char*		gao_get_port_name(struct gao_port* port);
 
 void		gao_rx_interrupt_handle(int ifindex, uint32_t qid);
-void		gao_rx_interrupt_threshold_handle(int ifindex, uint32_t qid);
+void 		gao_tx_interrupt_handle(int ifindex);
 
 void		gao_fabric_task(unsigned long);
 

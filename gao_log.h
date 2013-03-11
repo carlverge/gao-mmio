@@ -28,13 +28,13 @@
 #define	LOG_LEVEL_ERROR		0x0004
 #define LOG_LEVEL_FATAL		0x0002
 #define LOG_LEVEL_OFF		0x0000
-#define GAO_LOG_LEVEL		LOG_LEVEL_DP
-#define GAO_LOG_LOCK_ENABLE	1
+#define GAO_LOG_LEVEL		LOG_LEVEL_INFO
+#define GAO_LOG_LOCK_ENABLE	0
 #define GAO_OUTPUT_FILE		stderr
 
 
 #ifdef __KERNEL__
-#if GAO_LOG_LEVEL >= LOG_LEVEL_DEBUG
+#if GAO_LOG_LEVEL >= LOG_LEVEL_DP
 #define log_dp(FMT, ...)	printk("[DATAPLANE:%s:%d] " FMT "\n", __FILE__, __LINE__, ##__VA_ARGS__)
 #else
 #define log_dp(FMT, ...)

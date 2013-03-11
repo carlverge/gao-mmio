@@ -15,64 +15,15 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/prefetch.h>
+#include <net/ip_fib.h>
 #include "gao_mmio_resource.h"
 
 
-static struct gao_resources resources;
-
-inline struct gao_resources*	gao_get_resources(void) {
-	return &resources;
-}
-EXPORT_SYMBOL(gao_get_resources);
-
-/**
- * Get an interface pointer from a kernel ifindex.
- * @param ifindex The kernel netdev ifindex
- * @return The pointer to that interface if registered, NULL otherwise.
- */
-inline struct gao_port* gao_get_port_from_ifindex(int ifindex) {
-	if(unlikely((unsigned int)ifindex >= GAO_MAX_IFINDEX)) return NULL;
-	else return resources.ifindex_to_port_lut[ifindex];
-}
-EXPORT_SYMBOL(gao_get_port_from_ifindex);
-
-
-static int gao_open(struct inode *inode, struct file *filep) {
-	int ret = 0;
-	struct gao_file_private	*gao_file = NULL;
-
-	log_debug("Open file for filep %p", filep);
-
-
-	gao_file = kmalloc(sizeof(struct gao_file_private), GFP_KERNEL);
-	if(!gao_file) gao_error_val(-ENOMEM, "Failed to open device, out of memory.");
-	memset(gao_file, 0, sizeof(struct gao_file_private));
-
-	sema_init(&gao_file->lock, 1);
-
-	gao_file->filep = filep;
-	gao_file->state = GAO_RESOURCE_STATE_REGISTERED;
-	gao_file->grid = NULL;
-
-	filep->private_data = gao_file;
-	return 0;
-	err:
-	return ret;
-}
-
-static int gao_release(struct inode *inode, struct file *filep) {
-	struct gao_file_private* gao_file = filep->private_data;
-	log_debug("Release file for filep %p", filep);
-
-	if(gao_file->grid) gao_grid_return(&resources.grid_allocator, gao_file->grid);
-	//If we were bound to anything, remove the binding. If the queue was deleting,
-	//and we were the last reference, delete the queue.
-	kfree(filep->private_data);
+struct gao_resources gao_global_resources;
+EXPORT_SYMBOL(gao_global_resources);
 
 
 
-	return 0;
-}
 
 
 /**
@@ -103,7 +54,7 @@ int gao_mmap(struct file* filep, struct vm_area_struct* vma) {
 		vm_addr = vma->vm_start;
 
 		for(i = 0; i < GAO_GRIDS; i++) {
-			grid_addr = resources.grid_allocator.grids[i];
+			grid_addr = gao_global_resources.grid_allocator.grids[i];
 
 			//The grids are always evenly divisible by the pagesize
 			for(page_index = 0; page_index < (sizeof(struct gao_grid)/GAO_SMALLPAGE_SIZE); page_index++) {
@@ -117,20 +68,20 @@ int gao_mmap(struct file* filep, struct vm_area_struct* vma) {
 	} else {
 		log_debug("mmap: buffer request for length %llu base addr %lx", requested_length, vma->vm_start);
 
-		if(requested_length != resources.buffer_space_frame) {
+		if(requested_length != gao_global_resources.buffer_space_frame) {
 			gao_error_val(-EINVAL,  "Userspace requested invalid mmap size: %lu, can only map: %lu",
-					(unsigned long)requested_length, resources.buffer_space_frame);
+					(unsigned long)requested_length, gao_global_resources.buffer_space_frame);
 		}
 
 		//Walk the space frame, and map allocated buffer groups, if unallocated map the dummy frame
-		for(buffer_offset = 0; buffer_offset < (resources.buffer_space_frame); buffer_offset += GAO_BUFFER_SIZE) {
+		for(buffer_offset = 0; buffer_offset < (gao_global_resources.buffer_space_frame); buffer_offset += GAO_BUFFER_SIZE) {
 			//log_debug("Lookup: base_offset=%lx", group_offset);
 
 			//Is that a valid buffer group? This really kills performance, but it only needs to be done once.
 			for(buffer_addr = 0, index = 0; index < GAO_BUFFERS; index++) {
-				base_addr = (virt_to_phys(resources.buffers[index]) - resources.buffer_start_phys);
+				base_addr = (virt_to_phys(gao_global_resources.buffers[index]) - gao_global_resources.buffer_start_phys);
 				if(base_addr == buffer_offset) {
-					buffer_addr = virt_to_phys(resources.buffers[index]);
+					buffer_addr = virt_to_phys(gao_global_resources.buffers[index]);
 					//log_debug("Found buffer group at index %d, phys=%lx, base=%lx", index, (unsigned long)virt_to_phys(resources.buffer_groups[index]), base_addr);
 					break;
 				}
@@ -138,7 +89,7 @@ int gao_mmap(struct file* filep, struct vm_area_struct* vma) {
 
 			//Nope, map the dummy group
 			if(!buffer_addr) {
-				buffer_addr = virt_to_phys(resources.dummy_buffer);
+				buffer_addr = virt_to_phys(gao_global_resources.dummy_buffer);
 			}
 
 			vm_addr = vma->vm_start + (buffer_offset);
@@ -254,9 +205,9 @@ static int64_t	gao_ioctl_handle_mmap(struct file *filep, unsigned long request_p
 	request = kmalloc(sizeof(struct gao_request_mmap), GFP_KERNEL);
 	if(!request) gao_error_val(-ENOMEM, "IOCTL failed, no memory!");
 
-	request->bufferspace_size = resources.buffer_space_frame;
+	request->bufferspace_size = gao_global_resources.buffer_space_frame;
 	request->gridspace_size = sizeof(struct gao_grid)*GAO_GRIDS;
-	request->offset = resources.buffer_start_phys;
+	request->offset = gao_global_resources.buffer_start_phys;
 	log_debug("IOCTL: Get MMAP request returns bufferspace_size=%lx gridspace_size=%lx offset=%lx",
 			request->bufferspace_size, request->gridspace_size, request->offset);
 
@@ -267,11 +218,130 @@ static int64_t	gao_ioctl_handle_mmap(struct file *filep, unsigned long request_p
 	return ret;
 }
 
+void gao_tx_interrupt_handle(int ifindex) {
+	struct gao_tx_queue *txq = NULL;
+	struct gao_port *port = NULL;
+	uint32_t num_to_xmit;
+
+	log_dp("Handling tx interrupt for if/q (%d/%u)", ifindex, 0);
+
+	port = gao_ifindex_to_port(ifindex);
+	if(unlikely(!txq)) return;
+	if(unlikely(txq->state != GAO_RESOURCE_STATE_ACTIVE)) return;
+
+	if(spin_trylock(&txq->lock)) {
+
+		num_to_xmit = (txq->ring.avail - txq->ring.use);
+		port->port_ops->gao_xmit(&txq->ring, num_to_xmit, txq->hw_private);
+
+		spin_unlock(&txq->lock);
+	}
 
 
+}
+EXPORT_SYMBOL(gao_tx_interrupt_handle);
+
+static void gao_schedule_port(uint8_t port_id) {
+	struct gao_tx_queue* txq = NULL;
+	uint32_t	num_to_xmit;
+
+	txq = gao_global_resources.ports[port_id].tx_queues[0];
+	if(!txq) gao_error("Null sched port!");
+
+
+	if( (txq->ring.clean - txq->ring.forward) > (txq->ring.capacity/2) )
+		gao_return_descriptors(&gao_global_resources.descriptor_allocator, &txq->ring);
+
+
+	spin_lock(&txq->lock);
+	num_to_xmit = (txq->ring.avail - txq->ring.use);
+	gao_global_resources.ports[port_id].port_ops->gao_xmit(&txq->ring, num_to_xmit, txq->hw_private);
+	spin_unlock(&txq->lock);
+
+
+	err:
+	return;
+}
+
+static inline struct gao_grid* gao_fabric_get_grid(struct gao_fabric *fabric) {
+	struct gao_grid* grid = NULL;
+	spin_lock_bh(&fabric->lock);
+	//If there are any left, get the next grid
+	if((fabric->avail != fabric->use)) {
+		grid = fabric->grids[fabric->use & (GAO_GRIDS-1)];
+		fabric->use++;
+	}
+	spin_unlock_bh(&fabric->lock);
+	return grid;
+}
 
 void	gao_fabric_task(unsigned long data) {
+	struct gao_fabric *fabric = (struct gao_fabric*)data;
+	struct gao_grid	  *grid;
+	struct gao_action action;
+	struct gao_descriptor_ring *ring = fabric->free_desc;
+	struct gao_tx_queue *txq = NULL;
+	uint32_t	i, drops, fwds;
+	uint64_t	ports_to_sched = 0, next_port;
 	log_debug("Entering fabric tasklet");
+
+
+	while((grid = gao_fabric_get_grid(fabric))) {
+		drops = 0, fwds = 0;
+
+		log_debug("fabric [%hhu]: start grid processing", grid->header.id);
+
+		//just empty it for now
+		for(i = 0; i < grid->header.count; i++) {
+			action = grid->actions[i];
+
+			switch(action.action_id) {
+			case GAO_ACTION_FWD:
+
+				if((unlikely(action.fwd.dport > GAO_MAX_PORTS))) break;
+				txq = gao_global_resources.ports[action.fwd.dport].tx_queues[0];
+				if(unlikely(!txq)) break;
+
+				//no room left
+				if( (txq->ring.avail - txq->ring.forward) >= txq->ring.capacity ) break;
+
+				txq->ring.desc[txq->ring.avail & txq->ring.mask] = grid->desc[i];
+				log_dp("fabric [%hhu/%u]: fwd idx %u to dport %hhu (avail=%u forward=%u)", grid->header.id, i,
+						grid->desc[i].index, action.fwd.dport, txq->ring.avail, txq->ring.forward);
+				txq->ring.avail++;
+
+				ports_to_sched |= (((unsigned long)1) << action.fwd.dport);
+
+				continue;
+			case GAO_ACTION_DROP:
+			default:
+				break;
+			}
+
+			log_dp("fabric [%hhu/%u]: drop", grid->header.id, i);
+			drops++;
+			ring->desc[ring->avail & ring->mask] = grid->desc[i];
+			ring->avail++;
+		}
+
+
+		if(drops) {
+			log_debug("Returning %u drops", drops);
+			gao_empty_descriptors(&gao_global_resources.descriptor_allocator, ring);
+		}
+
+		gao_grid_return(&gao_global_resources.grid_allocator, grid);
+	}
+
+	log_debug("fabric: need to sched portmap: %016llx", ports_to_sched);
+	for(next_port = GAO_FFSL(ports_to_sched); next_port; next_port = GAO_FFSL(ports_to_sched)) {
+		next_port--; //Rewind it by 1 to get the 0-index
+		log_debug("fabric: schedule port id %llu", next_port);
+
+		gao_schedule_port(next_port);
+
+		ports_to_sched &= ~(((unsigned long)1) << next_port);
+	}
 
 
 
@@ -279,161 +349,239 @@ void	gao_fabric_task(unsigned long data) {
 }
 
 
-static int32_t	gao_rx_into_ring(struct gao_rx_queue* rxq) {
-	int32_t	ret = 0, num_read, num_cleaned;
+/**
+ * Send a grid to the fabric for forwarding
+ * @warning Transfers ownership of grid to the fabric
+ * @param fabric
+ * @param grid
+ */
+static inline void	gao_forward_grid(struct gao_fabric *fabric, struct gao_grid *grid) {
+	log_debug("Forwarding grid %hu", grid->header.id);
 
-	log_debug("start recv: fwd=%u clean=%u use=%u avail=%u", rxq->ring.forward, rxq->ring.clean, rxq->ring.use, rxq->ring.avail);
-	//Recv from clean to use
-	num_read = resources.ports[rxq->port_id].port_ops->gao_recv(&rxq->ring, (rxq->ring.use - rxq->ring.clean), rxq->hw_private);
-	if(num_read < 0) gao_error_val(-EIO, "recv failed");
+	spin_lock_bh(&fabric->lock);
 
-	rxq->ring.clean += num_read;
-	log_debug("done recv: fwd=%u clean=%u use=%u avail=%u", rxq->ring.forward, rxq->ring.clean, rxq->ring.use, rxq->ring.avail);
+	fabric->grids[fabric->avail & (GAO_GRIDS-1)] = grid;
+	//Kick off a forwarding cycle if there was nothing in the queue.
+	if(fabric->avail == fabric->use) tasklet_schedule(&fabric->task);
+	fabric->avail++;
 
-	//Refill from avail to forward. Unless we're an interrupt. That would be bad.
-	if( !in_interrupt() && ((rxq->ring.avail - rxq->ring.forward) < rxq->ring.capacity )) {
-		//XXX: Mode intr check to refill descriptors, and trylock? We will need to bh spinlock, anyways
-		gao_refill_descriptors(&resources.descriptor_allocator, &rxq->ring);
-		log_debug("done refill: fwd=%u clean=%u use=%u avail=%u", rxq->ring.forward, rxq->ring.clean, rxq->ring.use, rxq->ring.avail);
+	spin_unlock_bh(&fabric->lock);
+}
+
+/**
+ * Drop all descriptors in the grid.
+ * @warning Transfers ownership of grid to the fabric
+ * @param fabric
+ * @param grid
+ */
+static inline void gao_drop_grid(struct gao_grid *grid) {
+	uint32_t i;
+	log_debug("dropping grid %hu", grid->header.id);
+
+	for(i = 0; i < grid->header.count; i++) {
+		grid->actions[i].action_id = GAO_ACTION_DROP;
 	}
 
-	//Clean from use to avail
-	num_cleaned = resources.ports[rxq->port_id].port_ops->gao_clean(&rxq->ring, (rxq->ring.avail - rxq->ring.use), rxq->hw_private);
-	if(num_cleaned < 0) gao_error_val(-EIO, "clean failed");
-
-	rxq->ring.use += num_cleaned;
-	log_debug("done clean: fwd=%u clean=%u use=%u avail=%u", rxq->ring.forward, rxq->ring.clean, rxq->ring.use, rxq->ring.avail);
-
-	return (rxq->ring.clean - rxq->ring.forward);
-	err:
-	return ret;
+	gao_forward_grid(&gao_global_resources.fabric, grid);
 }
 
 
-static int32_t 	gao_rx_into_grid(struct gao_rx_queue* rxq, struct gao_grid* grid) {
+
+static inline void gao_add_pending_rx_queue(struct gao_rx_queue* rxq) {
+	unsigned long	flags = 0;
+
+	spin_lock_irqsave(&gao_global_resources.waitlist.lock, flags);
+
+	if(!rxq->pending_read) {
+		rxq->pending_read = 1;
+		if(unlikely(gao_ll_push(gao_global_resources.waitlist.rxq_list, rxq))) {
+			log_bug("Overflowed rx waitlist");
+		} else {
+			if(gao_global_resources.waitlist.is_blocking) {
+				gao_global_resources.waitlist.is_blocking = 0;
+				wake_up_interruptible(&gao_global_resources.waitlist.rxq_wait);
+				log_dp("Woke the rx wakelist");
+			}
+		}
+	}
+
+	spin_unlock_irqrestore(&gao_global_resources.waitlist.lock, flags);
+}
+
+
+/**
+ * Receive new descriptors from the NIC and refill empty descriptor slots.
+ * @warning Called from interrupt context
+ * @warning HW owns clean and use, SW owns avail and forward
+ * @param rxq
+ * @return Negative on error,
+ *
+ */
+static inline int32_t	gao_rx_into_ring(struct gao_rx_queue* rxq) {
+	int32_t	num_read, num_cleaned;
+	uint32_t forward = ACCESS_ONCE(rxq->ring.forward), avail = ACCESS_ONCE(rxq->ring.avail);
+
+	log_debug("start recv: fwd=%u clean=%u use=%u avail=%u", forward, rxq->ring.clean, rxq->ring.use, avail);
+	//Recv from clean to use
+	num_read = gao_global_resources.ports[rxq->port_id].port_ops->gao_recv(&rxq->ring, (rxq->ring.use - rxq->ring.clean), rxq->hw_private);
+	if(num_read > 0) rxq->ring.clean += num_read;
+	log_debug("done recv: fwd=%u clean=%u use=%u avail=%u", forward, rxq->ring.clean, rxq->ring.use, avail);
+
+
+	num_cleaned = gao_global_resources.ports[rxq->port_id].port_ops->gao_clean(&rxq->ring, (avail - rxq->ring.use), rxq->hw_private);
+	if(num_cleaned > 0) rxq->ring.use += num_cleaned;
+
+	gao_global_resources.ports[rxq->port_id].port_ops->gao_enable_rx_intr(rxq);
+
+	//Clean from use to avail
+	if(unlikely((avail - rxq->ring.use) == 0)) {
+		log_warn("rxq is starving!");
+		rxq->starving = 1;
+	}
+
+	log_debug("done clean: fwd=%u clean=%u use=%u avail=%u", forward, rxq->ring.clean, rxq->ring.use, avail);
+
+
+	return 0;
+}
+
+/**
+ * @warning Called from user context
+ * @warning HW owns clean and use, SW owns avail and forward
+ * @param rxq
+ * @param grid
+ * @return
+ */
+static inline int32_t 	gao_rx_into_grid(struct gao_rx_queue* rxq, struct gao_grid* grid) {
 	int32_t ret = 0, num_to_forward, i;
+	uint32_t use = ACCESS_ONCE(rxq->ring.use), clean = ACCESS_ONCE(rxq->ring.clean);
 
+	log_dp("rx to grid start: port/q (%u/%u) into grid %hhu", rxq->port_id, rxq->id, grid->header.id);
+	//spin_lock(&rxq->lock);
 
-	log_dp("Reading rxq port/q (%u/%u) into grid %hhu", rxq->port_id, rxq->id, grid->header.id);
-	spin_lock(&rxq->lock);
+	num_to_forward = (clean - rxq->ring.forward);
 
-	num_to_forward = gao_rx_into_ring(rxq);
-	log_debug("Rx ring returned %d to fwd", num_to_forward);
-	if(num_to_forward < 1) gao_error_val(-EIO, "rx into ring failed");
+	log_debug("rx to grid: fwd=%u clean=%u use=%u avail=%u num_to_forward=%u",
+			rxq->ring.forward, clean, use, rxq->ring.avail, num_to_forward);
 
+	if(!num_to_forward)
+		gao_bug_val(-EAGAIN, "rx into grid got no pkts");
 
-
+	//Put the descriptors into the grid
 	for(i = 0; i < num_to_forward; i++) {
 		grid->desc[i] = rxq->ring.desc[rxq->ring.forward & rxq->ring.mask];
 		rxq->ring.forward++;
 	}
-	log_debug("done fwd: fwd=%u clean=%u use=%u avail=%u", rxq->ring.forward, rxq->ring.clean, rxq->ring.use, rxq->ring.avail);
+	log_debug("rx to grid: fwd=%u clean=%u use=%u avail=%u", rxq->ring.forward, clean, use, rxq->ring.avail);
+
+	//Refill the ring's descriptors for rxq cleaning
+	if((rxq->ring.avail - rxq->ring.forward) < rxq->ring.capacity) {
+		if(unlikely(!gao_refill_descriptors(&gao_global_resources.descriptor_allocator, &rxq->ring))) {
+			log_bug("DESCRIPTOR GOOF: Ran out of descriptors globally");
+			gao_dump_resources();
+		}
+		log_debug("done refill: fwd=%u clean=%u use=%u avail=%u", rxq->ring.forward, clean, use, rxq->ring.avail);
+	}
 
 	grid->header.gao_ifindex = rxq->port_id;
 	grid->header.queue_idx = rxq->id;
 	grid->header.count = num_to_forward;
-	ret = 0;
-	log_debug("grid ready: id=%hhu count=%u port=%u qid=%u", grid->header.id, grid->header.count, grid->header.gao_ifindex, grid->header.queue_idx);
+	log_debug("rx to grid done: id=%hhu count=%u port=%u qid=%u", grid->header.id, grid->header.count, grid->header.gao_ifindex, grid->header.queue_idx);
 
+	return 0;
 	err:
-	spin_unlock(&rxq->lock);
-	resources.ports[rxq->port_id].port_ops->gao_enable_rx_interrupts(rxq);
 	return ret;
 }
 
 
 
-
-
-long gao_ioctl_read_grid(struct file *filep) {
-	unsigned long irq_flags;
-	int32_t ret = 0;
-	struct gao_grid* grid = NULL;
-	struct gao_rx_queue* rxq = NULL;
+long gao_ioctl_send_grid(struct file *filep) {
 	struct gao_file_private* gao_file = filep->private_data;
 
-	if(unlikely(gao_file->grid)) {
-		log_error("Already own a grid");
-		return -EBUSY;
+	if(unlikely(!gao_file->grid)) {
+		log_error("Don't have a grid");
+		return -EINVAL;
 	}
 
+	gao_forward_grid(&gao_global_resources.fabric, gao_file->grid);
+	gao_file->grid = NULL;
+
+	return 0;
+}
+
+
+/**
+ * FIXME: This whole system is bunk, also when queues are being deleted we will need to delete them in here
+ * refcount on the queues?
+ * @return
+ */
+static inline struct gao_rx_queue* gao_get_pending_rx_queue(void) {
+	struct gao_rx_queue* rxq = NULL;
+	unsigned long flags = 0;
+
 	read_again:
-	log_debug("Polling for grids...");
+	spin_lock_irqsave(&gao_global_resources.waitlist.lock, flags);
+	rxq = gao_ll_remove(gao_global_resources.waitlist.rxq_list);
+	if(!rxq) gao_global_resources.waitlist.is_blocking = 1;
+	else {
+		rxq->pending_read = 0;
+		gao_global_resources.waitlist.is_blocking = 0;
+	}
+	spin_unlock_irqrestore(&gao_global_resources.waitlist.lock, flags);
 
-	spin_lock_irqsave(&resources.waitlist.lock, irq_flags);
-
-	if(resources.waitlist.rxq_cnt) {
-		grid = gao_grid_get(&resources.grid_allocator);
-		if(unlikely(!grid)) gao_error("No grids left!");
-
-		log_debug("Got grid %hu", grid->header.id);
-		rxq = gao_ll_remove(resources.waitlist.rxq_list);
-		resources.waitlist.rxq_cnt--;
-
-		if(unlikely(!rxq)) {
-			log_bug("Got a null rxq!");
-			gao_grid_return(&resources.grid_allocator, grid);
-			spin_unlock_irqrestore(&resources.waitlist.lock, irq_flags);
-			goto read_again;
-		}
-
-		log_debug("Got rxq port/q (%u/%u) (rxq_cnt=%u)", rxq->port_id, rxq->id, resources.waitlist.rxq_cnt);
-		ret = gao_rx_into_grid(rxq, grid);
-
-
-		//Reading into the grid failed, try another one
-		if(ret) {
-			gao_grid_return(&resources.grid_allocator, grid);
-			spin_unlock_irqrestore(&resources.waitlist.lock, irq_flags);
-			goto read_again;
-		}
-
-
-	} else {
-		//If there are no outstanding queues, go into waiting
-		spin_unlock_irqrestore(&resources.waitlist.lock, irq_flags);
-		if(wait_event_interruptible(resources.waitlist.rxq_wait, resources.waitlist.rxq_cnt)) {
-			goto interrupted;
+	if(!rxq) {
+		if(wait_event_interruptible(gao_global_resources.waitlist.rxq_wait, !gao_global_resources.waitlist.is_blocking)) {
+			return NULL;
 		} else {
 			goto read_again;
 		}
 	}
 
+	return rxq;
+}
 
-	spin_unlock_irqrestore(&resources.waitlist.lock, irq_flags);
-	log_debug("Got grid id %u", grid->header.id);
+
+long gao_ioctl_recv_grid(struct file *filep) {
+	int32_t ret = 0;
+	struct gao_grid* grid = NULL;
+	struct gao_rx_queue* rxq = NULL;
+	struct gao_file_private* gao_file = filep->private_data;
+
+	if(unlikely(gao_file->grid)) gao_error_val(-EBUSY, "recv grid: already own a grid");
+
+	grid = gao_grid_get(&gao_global_resources.grid_allocator);
+	if(unlikely(!grid)) gao_error_val(-ENOMEM,"recv grid: no grids left!");
+
+
+	read_again:
+	log_debug("recv grid: polling for rx queue...");
+
+	rxq = gao_get_pending_rx_queue();
+	if(unlikely(!rxq)) {
+		gao_grid_return(&gao_global_resources.grid_allocator, grid);
+		gao_error_val(-EINTR, "read interrupted or failed");
+	}
+
+
+	log_debug("Got rxq port/q (%u/%u)", rxq->port_id, rxq->id);
+	ret = gao_rx_into_grid(rxq, grid);
+	if(ret) {
+		log_debug("reading into grid failed: ret=%d", ret);
+		goto read_again;
+	}
+	log_debug("recv grid: %u pkts into grid id %u", grid->header.count, grid->header.id);
+
+
 	gao_file->grid = grid;
 	return grid->header.id;
-
 	err:
-	spin_unlock_irqrestore(&resources.waitlist.lock, irq_flags);
-	return -1;
-
-	interrupted:
-	return -EINTR;
+	return ret;
 }
 
-void	gao_rx_interrupt_threshold_handle(int ifindex, uint32_t qid) {
-	struct gao_rx_queue *rxq = NULL;
 
-	log_dp("Handling rx threshold interrupt for if/q (%d/%u)", ifindex, qid);
 
-	//Bounds check the indicies. The memory is statically allocated.
-	if(unlikely( (((uint32_t)ifindex) > GAO_MAX_IFINDEX) || (qid > GAO_MAX_PORT_HWQUEUE) )) return;
 
-	rxq = resources.ifindex_to_port_lut[((uint32_t)ifindex)]->rx_queues[qid];
-	if(unlikely(!rxq)) return;
-	if(unlikely(rxq->state != GAO_RESOURCE_STATE_ACTIVE)) return;
 
-	if(spin_trylock(&rxq->lock)) {
-		log_dp("Threshold interrupt locked ring");
-		gao_rx_into_ring(rxq);
-		spin_unlock(&rxq->lock);
-	} else {
-		log_dp("Threshold interrupt could not lock ring");
-	}
-}
-EXPORT_SYMBOL(gao_rx_interrupt_threshold_handle);
 
 /**
  * Post the rx queue as pending receive
@@ -449,26 +597,14 @@ void	gao_rx_interrupt_handle(int ifindex, uint32_t qid) {
 	//Bounds check the indicies. The memory is statically allocated.
 	if(unlikely( (((uint32_t)ifindex) > GAO_MAX_IFINDEX) || (qid > GAO_MAX_PORT_HWQUEUE) )) return;
 
-	rxq = resources.ifindex_to_port_lut[((uint32_t)ifindex)]->rx_queues[qid];
+	rxq = gao_global_resources.ifindex_to_port_lut[((uint32_t)ifindex)]->rx_queues[qid];
 	if(unlikely(!rxq)) return;
 	if(unlikely(rxq->state != GAO_RESOURCE_STATE_ACTIVE)) return;
 
-	spin_lock(&resources.waitlist.lock);
+	gao_global_resources.ports[rxq->port_id].port_ops->gao_disable_rx_intr(rxq);
+	gao_rx_into_ring(rxq);
+	gao_add_pending_rx_queue(rxq);
 
-	if(unlikely(gao_ll_push(resources.waitlist.rxq_list, rxq))) {
-		log_bug("Overflowed rx waitlist");
-	} else {
-		resources.waitlist.rxq_cnt++;
-		log_dp("Waitlist count is now %u", resources.waitlist.rxq_cnt);
-	}
-
-	//There was nothing in the list before, signal any waiters
-	if(resources.waitlist.rxq_cnt == 1)
-		wake_up_interruptible(&resources.waitlist.rxq_wait);
-
-	resources.ifindex_to_port_lut[((uint32_t)ifindex)]->port_ops->gao_disable_rx_interrupts(rxq);
-
-	spin_unlock(&resources.waitlist.lock);
 	return;
 }
 EXPORT_SYMBOL(gao_rx_interrupt_handle);
@@ -507,8 +643,15 @@ long gao_ioctl (struct file *filep, unsigned int command, unsigned long argument
 	log_dp("IOCTL: Got an ioctl with %u command and %lx arg", command, argument_ptr);
 
 	switch(command) {
-	case GAO_IOCTL_READ_GRID:
-		ret = gao_ioctl_read_grid(filep);
+	case GAO_IOCTL_RECV_GRID:
+		ret = gao_ioctl_recv_grid(filep);
+		break;
+	case GAO_IOCTL_SEND_GRID:
+		ret = gao_ioctl_send_grid(filep);
+		break;
+	case GAO_IOCTL_EXCH_GRID:
+		gao_ioctl_send_grid(filep);
+		ret = gao_ioctl_recv_grid(filep);
 		break;
 	case GAO_IOCTL_COMMAND_GET_MMAP_SIZE:
 		ret = gao_ioctl_handle_mmap(filep, argument_ptr);
@@ -527,6 +670,44 @@ long gao_ioctl (struct file *filep, unsigned int command, unsigned long argument
 	err:
 	gao_unlock_file(filep->private_data);
 	return ret;
+}
+
+static int gao_open(struct inode *inode, struct file *filep) {
+	int ret = 0;
+	struct gao_file_private	*gao_file = NULL;
+
+	log_debug("Open file for filep %p", filep);
+
+
+	gao_file = kmalloc(sizeof(struct gao_file_private), GFP_KERNEL);
+	if(!gao_file) gao_error_val(-ENOMEM, "Failed to open device, out of memory.");
+	memset(gao_file, 0, sizeof(struct gao_file_private));
+
+	sema_init(&gao_file->lock, 1);
+
+	gao_file->filep = filep;
+	gao_file->state = GAO_RESOURCE_STATE_REGISTERED;
+	gao_file->grid = NULL;
+
+	filep->private_data = gao_file;
+	return 0;
+	err:
+	return ret;
+}
+
+static int gao_release(struct inode *inode, struct file *filep) {
+	struct gao_file_private* gao_file = filep->private_data;
+	log_debug("Release file for filep %p", filep);
+
+	if(gao_file->grid) {
+		gao_drop_grid(gao_file->grid);
+	}
+
+	//If we were bound to anything, remove the binding. If the queue was deleting,
+	//and we were the last reference, delete the queue.
+	kfree(filep->private_data);
+
+	return 0;
 }
 
 
@@ -551,7 +732,7 @@ static struct miscdevice gao_miscdev = {
 
 static void __exit gao_mmio_exit(void)
 {
-	gao_free_resources(&resources);
+	gao_free_resources(&gao_global_resources);
 	misc_deregister(&gao_miscdev);
 
 	log_info("Removing GAOMMIO.");
@@ -568,9 +749,9 @@ static int __init gao_mmio_init(void) {
 	if(ret) gao_error("Failed to register device.");
 
 
-	ret = gao_init_resources(&resources);
-
+	ret = gao_init_resources(&gao_global_resources);
 	if(ret) log_error("Failed to initialize gaommio.");
+	gao_dump_resources();
 
     log_debug("GAOMMIO registered to Major: 10 Minor: %i Name: /dev/%s.", gao_miscdev.minor, gao_miscdev.name);
 

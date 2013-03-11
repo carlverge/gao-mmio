@@ -215,7 +215,7 @@ void	gao_e1000_activate_port(struct net_device *netdev) {
 	gao_lock_resources(resources);
 
 	adapter = netdev_priv(netdev);
-	port = gao_get_port_from_ifindex(netdev->ifindex);
+	port = gao_ifindex_to_port(netdev->ifindex);
 	hw = &adapter->hw;
 
 	if(!port)
@@ -276,7 +276,7 @@ int64_t	gao_e1000_deactivate_port(struct net_device *netdev) {
 
 	gao_lock_resources(resources);
 
-	port = gao_get_port_from_ifindex(netdev->ifindex);
+	port = gao_ifindex_to_port(netdev->ifindex);
 
 	if(!port)
 		gao_error("Unknown interface, cannot deactivate.");

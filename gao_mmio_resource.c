@@ -15,14 +15,6 @@
 #include "gao_mmio_resource.h"
 
 
-const static char *gao_resource_state_str[] = {"Unused", "Registered", "Active", "Configuring", "Deleting", "Error", "Invalid State"};
-
-const char*	gao_resource_state_string(gao_resource_state_t state) {
-	if(state >= GAO_RESOURCE_STATE_FINAL) return gao_resource_state_str[GAO_RESOURCE_STATE_FINAL];
-	else return gao_resource_state_str[state];
-}
-
-
 #define GAO_BUFFER_FILL_VAL			(0xDEADBEEF)
 #define GAO_BUFFER_TEST_STR_LEN		(16)
 #define GAO_BUFFER_TEST_STR_FMT		"GAO:BFN%08x"
@@ -557,6 +549,11 @@ struct gao_grid* gao_grid_get(struct gao_grid_allocator *allocator) {
 
 	err:
 	gao_unlock_grid_allocator(allocator);
+
+	grid->header.count = 0;
+	grid->header.gao_ifindex = 0;
+	grid->header.queue_idx = 0;
+
 	return grid;
 }
 
@@ -605,8 +602,10 @@ static  struct gao_descriptor_ring* gao_create_descriptor_ring(uint32_t order) {
 
 
 static void gao_free_rx_queue(struct gao_resources *resources, struct gao_rx_queue* queue) {
-	log_debug("Freeing rx queue");
 	if(queue) {
+		log_debug("Freeing rx queue %u/%u", queue->port_id, queue->id);
+		queue->state = GAO_RESOURCE_STATE_DELETING;
+		synchronize_rcu();
 		gao_empty_descriptors(&resources->descriptor_allocator, &queue->ring);
 		kfree(queue);
 	}
@@ -639,8 +638,10 @@ static struct gao_rx_queue* gao_create_rx_queue(struct gao_resources *resources,
 }
 
 static void gao_free_tx_queue(struct gao_resources *resources, struct gao_tx_queue* queue) {
-	log_debug("Freeing tx queue");
 	if(queue) {
+		log_debug("Freeing tx queue %u/%u", queue->port_id, queue->id);
+		queue->state = GAO_RESOURCE_STATE_DELETING;
+		synchronize_rcu();
 		gao_empty_descriptors(&resources->descriptor_allocator, &queue->ring);
 		kfree(queue);
 	}
@@ -756,7 +757,7 @@ static int64_t	gao_init_queue_waitlist(struct gao_queue_waitlist *waitlist) {
 
 	waitlist->rxq_list = gao_create_ll_cache(256);
 	check_ptr(waitlist->rxq_list);
-	waitlist->rxq_cnt = 0;
+	waitlist->is_blocking = 0;
 	init_waitqueue_head(&waitlist->rxq_wait);
 
 	return 0;
@@ -784,7 +785,7 @@ static int64_t	gao_init_fabric(struct gao_fabric *fabric) {
 	fabric->free_desc = gao_create_descriptor_ring(GAO_GRID_ORDER);
 	check_ptr(fabric->free_desc);
 
-	tasklet_init(&fabric->task, gao_fabric_task, 0);
+	tasklet_init(&fabric->task, gao_fabric_task, (unsigned long)fabric);
 
 	return 0;
 	err:
@@ -829,7 +830,51 @@ int		gao_lock_file(struct gao_file_private *gao_file) {
 	return ret;
 }
 
+void	__gao_dump_resources(struct gao_resources* resources) {
+	uint64_t i,j;
+	struct gao_port *port = NULL;
+	struct gao_rx_queue *rxq = NULL;
+	struct gao_tx_queue *txq = NULL;
 
+	log_debug("Dumping Global Resource State:");
+	log_debug("Buffers: hugepages:%s num=%lu start=%lx end=%lx frame=%lx (%lu MB) gaps=%lu range: %08lx <-> %08lx",
+				resources->hugepage_mode ? "on" : "off",
+				(unsigned long)GAO_BUFFERS,
+				(unsigned long)resources->buffer_start_phys, (unsigned long)resources->buffer_end_phys,
+				(unsigned long)resources->buffer_space_frame,
+				(unsigned long)resources->buffer_space_frame >> 20,
+				(unsigned long)((resources->buffer_space_frame/GAO_BUFFER_SIZE) - GAO_BUFFERS),
+				resources->buffer_start_phys >> GAO_BFN_SHIFT, resources->buffer_end_phys >> GAO_BFN_SHIFT);
+	log_debug("Descriptor Allocator: free=(%u/%u) use=%u avail=%u max_avail=%u commit_delta=%u",
+			resources->descriptor_allocator.avail - resources->descriptor_allocator.use, GAO_DESCRIPTORS, resources->descriptor_allocator.use,
+			resources->descriptor_allocator.avail, resources->descriptor_allocator.max_avail, resources->descriptor_allocator.return_delta);
+	log_debug("Grid Allocator: free=(%u/%u) ",
+			resources->grid_allocator.count, GAO_GRIDS);
+
+	log_debug("RX Waitlist: %u", resources->waitlist.is_blocking);
+
+	log_debug("Queues:");
+	for(i = 0; i < GAO_MAX_PORTS; i++) {
+		port = &resources->ports[i];
+		if(port->state == GAO_RESOURCE_STATE_ACTIVE) {
+			for(j = 0; j < port->num_rx_queues; j++) {
+				rxq = port->rx_queues[j];
+				log_debug("rxq %llu/%u: capacity=%u watermark=%u avail=%u/%u use=%u/%u clean=%u/%u forward=%u/%u left=%u",
+						port->gao_ifindex, rxq->id, rxq->ring.capacity, rxq->ring.watermark, rxq->ring.avail, rxq->ring.avail&rxq->ring.mask,
+						rxq->ring.use, rxq->ring.use&rxq->ring.mask, rxq->ring.clean, rxq->ring.clean&rxq->ring.mask, rxq->ring.forward,
+						rxq->ring.forward&rxq->ring.mask, rxq->ring.avail - rxq->ring.forward);
+			}
+			for(j = 0; j < port->num_tx_queues; j++) {
+				txq = port->tx_queues[j];
+				log_debug("txq %llu/%u: capacity=%u watermark=%u avail=%u/%u use=%u/%u clean=%u/%u forward=%u/%u left=%u",
+						port->gao_ifindex, txq->id, txq->ring.capacity, txq->ring.watermark, txq->ring.avail, txq->ring.avail&txq->ring.mask,
+						txq->ring.use, txq->ring.use&txq->ring.mask, txq->ring.clean, txq->ring.clean&txq->ring.mask, txq->ring.forward,
+						txq->ring.forward&txq->ring.mask, txq->ring.avail - txq->ring.forward);
+			}
+		}
+	}
+
+}
 
 void	gao_unlock_resources(struct gao_resources* resources) {
 	up(&resources->config_lock);
