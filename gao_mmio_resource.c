@@ -558,6 +558,130 @@ struct gao_grid* gao_grid_get(struct gao_grid_allocator *allocator) {
 }
 
 
+static void gao_init_queue_set(struct gao_queue_set* set) {
+	memset((void*)set, 0, sizeof(struct gao_queue_set));
+	spin_lock_init(&set->lock);
+	init_waitqueue_head(&set->wait);
+}
+
+/**
+ * Add the specified queue to the set. If the id/qid combination is valid,
+ * the add must succeed.
+ * @param set
+ * @param port_id The gao port_id (not the kernel's)
+ * @param qid The HW qid.
+ */
+void gao_queue_set_add(struct gao_queue_set* set, uint32_t port_id, uint32_t qid) {
+	unsigned long flags = 0;
+
+	if(unlikely( (port_id >= GAO_MAX_PORTS) || (qid >= GAO_MAX_PORT_HWQUEUE) ))
+		return;
+
+	spin_lock_irqsave(&set->lock, flags);
+
+	if(unlikely( (set->avail-set->use) > (GAO_MAX_PORTS*GAO_MAX_PORT_HWQUEUE) ))
+		log_bug("Queue set at %p overflowed", set);
+
+	if(!set->set_queues[port_id][qid]) {
+		set->queues[set->avail & ((GAO_MAX_PORTS*GAO_MAX_PORT_HWQUEUE)-1)].port_id = port_id;
+		set->queues[set->avail & ((GAO_MAX_PORTS*GAO_MAX_PORT_HWQUEUE)-1)].id = qid;
+		set->set_queues[port_id][qid] = 1;
+		set->avail++;
+	}
+
+	if(set->waitcount) {
+		wake_up_interruptible(&set->wait);
+	}
+
+	spin_unlock_irqrestore(&set->lock, flags);
+}
+
+void gao_queue_set_add_ifindex(struct gao_queue_set* set, int ifindex, uint32_t qid) {
+	struct gao_port* port;
+
+	if(unlikely(((unsigned int)ifindex) >= GAO_MAX_IFINDEX))
+		return;
+
+	port = gao_global_resources.ifindex_to_port_lut[ifindex];
+	if(likely(port)) gao_queue_set_add(set, port->gao_ifindex, qid);
+}
+
+/**
+ * Blocking read on a queue set. Reads the next queue into the hwqueue struct
+ * pointed to by hwq.
+ * @warning Only called from user context
+ * @param set
+ * @param hwq A pointer to an empty hw_queue to read into
+ * @return -EINTR if interrupted, 0 on success.
+ */
+int32_t gao_queue_set_get(struct gao_queue_set* set, struct gao_hw_queue* hwq) {
+	unsigned long flags = 0;
+	int32_t	ret = 0;
+	uint32_t port_id, qid;
+
+	spin_lock_irqsave(&set->lock, flags);
+
+	while((set->avail == set->use) && !ret) {
+		set->waitcount++;
+		spin_unlock_irqrestore(&set->lock, flags);
+
+		if(wait_event_interruptible(set->wait, (set->avail > set->use))) {
+			spin_lock_irqsave(&set->lock, flags);
+			set->waitcount--;
+			spin_unlock_irqrestore(&set->lock, flags);
+			log_debug("read queue set interrupted");
+			return -EINTR;
+
+		}
+
+		spin_lock_irqsave(&set->lock, flags);
+		set->waitcount--;
+	}
+
+
+	port_id = set->queues[set->use & ((GAO_MAX_PORTS*GAO_MAX_PORT_HWQUEUE)-1)].port_id;
+	qid = set->queues[set->use & ((GAO_MAX_PORTS*GAO_MAX_PORT_HWQUEUE)-1)].id;
+	hwq->port_id = port_id;
+	hwq->id = qid;
+	set->set_queues[port_id][qid] = 0;
+	set->use++;
+
+	spin_unlock_irqrestore(&set->lock, flags);
+	return 0;
+}
+
+/**
+ * Non blocking read on a queue set. Reads the next queue into the hwqueue
+ * struct pointed to by hwq.
+ * @param set
+ * @param hwq A pointer to an empty hw_queue to read into
+ * @return -EAGAIN if there is no queue. 0 on success.
+ */
+int32_t gao_queue_set_get_noblk(struct gao_queue_set* set, struct gao_hw_queue* hwq) {
+	unsigned long flags = 0;
+	int32_t	ret = -EAGAIN;
+	uint32_t port_id, qid;
+
+	spin_lock_irqsave(&set->lock, flags);
+
+	if(set->avail > set->use) {
+		port_id = set->queues[set->use & ((GAO_MAX_PORTS*GAO_MAX_PORT_HWQUEUE)-1)].port_id;
+		qid = set->queues[set->use & ((GAO_MAX_PORTS*GAO_MAX_PORT_HWQUEUE)-1)].id;
+		hwq->port_id = port_id;
+		hwq->id = qid;
+		set->set_queues[port_id][qid] = 0;
+		set->use++;
+		ret = 0;
+	}
+
+	spin_unlock_irqrestore(&set->lock, flags);
+	return ret;
+}
+
+
+
+
+
 static void gao_dtor_descriptor_ring(struct gao_descriptor_ring* ring) {
 
 }
@@ -604,8 +728,6 @@ static  struct gao_descriptor_ring* gao_create_descriptor_ring(uint32_t order) {
 static void gao_free_rx_queue(struct gao_resources *resources, struct gao_rx_queue* queue) {
 	if(queue) {
 		log_debug("Freeing rx queue %u/%u", queue->port_id, queue->id);
-		queue->state = GAO_RESOURCE_STATE_DELETING;
-		synchronize_rcu();
 		gao_empty_descriptors(&resources->descriptor_allocator, &queue->ring);
 		kfree(queue);
 	}
@@ -640,8 +762,6 @@ static struct gao_rx_queue* gao_create_rx_queue(struct gao_resources *resources,
 static void gao_free_tx_queue(struct gao_resources *resources, struct gao_tx_queue* queue) {
 	if(queue) {
 		log_debug("Freeing tx queue %u/%u", queue->port_id, queue->id);
-		queue->state = GAO_RESOURCE_STATE_DELETING;
-		synchronize_rcu();
 		gao_empty_descriptors(&resources->descriptor_allocator, &queue->ring);
 		kfree(queue);
 	}
@@ -662,6 +782,7 @@ static struct gao_tx_queue* gao_create_tx_queue(struct gao_resources *resources,
 	memset((void*)queue, 0, alloc_size);
 	spin_lock_init(&queue->lock);
 
+
 	if(gao_init_descriptor_ring(&queue->ring, order)) gao_error("Failed ot init descriptor ring");
 
 	return queue;
@@ -672,18 +793,29 @@ static struct gao_tx_queue* gao_create_tx_queue(struct gao_resources *resources,
 
 void		gao_delete_port_queues(struct gao_resources *resources, struct gao_port *port) {
 	uint64_t i;
+	struct gao_rx_queue* rxq;
+	struct gao_tx_queue* txq;
+
 	if(port) {
 		log_debug("Deleting port queues for port %llu", port->gao_ifindex);
 
 		for(i = 0; i < GAO_MAX_PORT_HWQUEUE; i++) {
-			if(port->rx_queues[i]) gao_free_rx_queue(resources, port->rx_queues[i]);
-			port->rx_queues[i] = NULL;
+			rxq = port->rx_queues[i];
+			rcu_assign_pointer(port->rx_queues[i], NULL);
+			if(rxq) {
+				synchronize_rcu();
+				gao_free_rx_queue(resources, rxq);
+			}
+
+			txq = port->tx_queues[i];
+			rcu_assign_pointer(port->tx_queues[i], NULL);
+			if(txq) {
+				synchronize_rcu();
+				gao_free_tx_queue(resources, txq);
+			}
 		}
 
-		for(i = 0; i < GAO_MAX_PORT_HWQUEUE; i++) {
-			if(port->tx_queues[i]) gao_free_tx_queue(resources, port->tx_queues[i]);
-			port->tx_queues[i] = NULL;
-		}
+
 	}
 
 
@@ -723,7 +855,6 @@ int64_t 	gao_create_port_queues(struct gao_resources* resources, struct gao_port
 		rxq->id = i;
 		rxq->port_id = port->gao_ifindex;
 
-		rxq->state = GAO_RESOURCE_STATE_ACTIVE;
 	}
 
 	for(i = 0; i < port->num_tx_queues; i++) {
@@ -734,7 +865,6 @@ int64_t 	gao_create_port_queues(struct gao_resources* resources, struct gao_port
 		txq->id = i;
 		txq->port_id = port->gao_ifindex;
 
-		txq->state = GAO_RESOURCE_STATE_ACTIVE;
 	}
 
 
@@ -745,26 +875,26 @@ int64_t 	gao_create_port_queues(struct gao_resources* resources, struct gao_port
 	return ret;
 }
 
-static void		gao_dtor_queue_waitlist(struct gao_queue_waitlist *waitlist) {
-	if(waitlist) {
-		if(waitlist->rxq_list) gao_free_ll_cache(waitlist->rxq_list);
-	}
-}
-
-static int64_t	gao_init_queue_waitlist(struct gao_queue_waitlist *waitlist) {
-
-	spin_lock_init(&waitlist->lock);
-
-	waitlist->rxq_list = gao_create_ll_cache(256);
-	check_ptr(waitlist->rxq_list);
-	waitlist->is_blocking = 0;
-	init_waitqueue_head(&waitlist->rxq_wait);
-
-	return 0;
-	err:
-	gao_dtor_queue_waitlist(waitlist);
-	return -ENOMEM;
-}
+//static void		gao_dtor_queue_waitlist(struct gao_queue_waitlist *waitlist) {
+//	if(waitlist) {
+//		if(waitlist->rxq_list) gao_free_ll_cache(waitlist->rxq_list);
+//	}
+//}
+//
+//static int64_t	gao_init_queue_waitlist(struct gao_queue_waitlist *waitlist) {
+//
+//	spin_lock_init(&waitlist->lock);
+//
+//	waitlist->rxq_list = gao_create_ll_cache(256);
+//	check_ptr(waitlist->rxq_list);
+//	waitlist->is_blocking = 0;
+//	init_waitqueue_head(&waitlist->rxq_wait);
+//
+//	return 0;
+//	err:
+//	gao_dtor_queue_waitlist(waitlist);
+//	return -ENOMEM;
+//}
 
 static void gao_dtor_fabric(struct gao_fabric *fabric) {
 	log_debug("Destroying fabric.");
@@ -836,8 +966,8 @@ void	__gao_dump_resources(struct gao_resources* resources) {
 	struct gao_rx_queue *rxq = NULL;
 	struct gao_tx_queue *txq = NULL;
 
-	log_debug("Dumping Global Resource State:");
-	log_debug("Buffers: hugepages:%s num=%lu start=%lx end=%lx frame=%lx (%lu MB) gaps=%lu range: %08lx <-> %08lx",
+	log_info("Dumping Global Resource State:");
+	log_info("Buffers: hugepages:%s num=%lu start=%lx end=%lx frame=%lx (%lu MB) gaps=%lu range: %08lx <-> %08lx",
 				resources->hugepage_mode ? "on" : "off",
 				(unsigned long)GAO_BUFFERS,
 				(unsigned long)resources->buffer_start_phys, (unsigned long)resources->buffer_end_phys,
@@ -845,28 +975,35 @@ void	__gao_dump_resources(struct gao_resources* resources) {
 				(unsigned long)resources->buffer_space_frame >> 20,
 				(unsigned long)((resources->buffer_space_frame/GAO_BUFFER_SIZE) - GAO_BUFFERS),
 				resources->buffer_start_phys >> GAO_BFN_SHIFT, resources->buffer_end_phys >> GAO_BFN_SHIFT);
-	log_debug("Descriptor Allocator: free=(%u/%u) use=%u avail=%u max_avail=%u commit_delta=%u",
+	log_info("Descriptor Allocator: free=(%u/%u) use=%u avail=%u max_avail=%u commit_delta=%u",
 			resources->descriptor_allocator.avail - resources->descriptor_allocator.use, GAO_DESCRIPTORS, resources->descriptor_allocator.use,
 			resources->descriptor_allocator.avail, resources->descriptor_allocator.max_avail, resources->descriptor_allocator.return_delta);
-	log_debug("Grid Allocator: free=(%u/%u) ",
+	log_info("Grid Allocator: free=(%u/%u) ",
 			resources->grid_allocator.count, GAO_GRIDS);
 
-	log_debug("RX Waitlist: %u", resources->waitlist.is_blocking);
+	log_info("RX Waitlist: use=%u avail=%u", resources->rx_waitlist.use, resources->rx_waitlist.avail);
+	for(i = ACCESS_ONCE(resources->rx_waitlist.use); i != resources->rx_waitlist.avail; i++) {
+		log_info("%llu: port=%u id=%u", i,
+				resources->rx_waitlist.queues[i & ((GAO_MAX_PORTS*GAO_MAX_PORT_HWQUEUE)-1)].port_id,
+				resources->rx_waitlist.queues[i & ((GAO_MAX_PORTS*GAO_MAX_PORT_HWQUEUE)-1)].id);
+	}
 
-	log_debug("Queues:");
+
+	log_info("Queues:");
 	for(i = 0; i < GAO_MAX_PORTS; i++) {
 		port = &resources->ports[i];
 		if(port->state == GAO_RESOURCE_STATE_ACTIVE) {
 			for(j = 0; j < port->num_rx_queues; j++) {
 				rxq = port->rx_queues[j];
-				log_debug("rxq %llu/%u: capacity=%u watermark=%u avail=%u/%u use=%u/%u clean=%u/%u forward=%u/%u left=%u",
-						port->gao_ifindex, rxq->id, rxq->ring.capacity, rxq->ring.watermark, rxq->ring.avail, rxq->ring.avail&rxq->ring.mask,
+				log_info("rxq %llu/%u: (starving: %s) capacity=%u watermark=%u avail=%u/%u use=%u/%u clean=%u/%u forward=%u/%u left=%u",
+						port->gao_ifindex, rxq->id, atomic_read(&rxq->starving) ? "yes" : "no",
+						rxq->ring.capacity, rxq->ring.watermark, rxq->ring.avail, rxq->ring.avail&rxq->ring.mask,
 						rxq->ring.use, rxq->ring.use&rxq->ring.mask, rxq->ring.clean, rxq->ring.clean&rxq->ring.mask, rxq->ring.forward,
 						rxq->ring.forward&rxq->ring.mask, rxq->ring.avail - rxq->ring.forward);
 			}
 			for(j = 0; j < port->num_tx_queues; j++) {
 				txq = port->tx_queues[j];
-				log_debug("txq %llu/%u: capacity=%u watermark=%u avail=%u/%u use=%u/%u clean=%u/%u forward=%u/%u left=%u",
+				log_info("txq %llu/%u: capacity=%u watermark=%u avail=%u/%u use=%u/%u clean=%u/%u forward=%u/%u left=%u",
 						port->gao_ifindex, txq->id, txq->ring.capacity, txq->ring.watermark, txq->ring.avail, txq->ring.avail&txq->ring.mask,
 						txq->ring.use, txq->ring.use&txq->ring.mask, txq->ring.clean, txq->ring.clean&txq->ring.mask, txq->ring.forward,
 						txq->ring.forward&txq->ring.mask, txq->ring.avail - txq->ring.forward);
@@ -888,7 +1025,7 @@ void	gao_free_resources(struct gao_resources *resources) {
 
 	gao_dtor_fabric(&resources->fabric);
 	gao_free_ports(resources);
-	gao_dtor_queue_waitlist(&resources->waitlist);
+	//gao_dtor_queue_waitlist(&resources->waitlist);
 	gao_dtor_grid_allocator(&resources->grid_allocator);
 	gao_free_descriptor_allocator_ring(resources);
 	gao_free_buffers(resources);
@@ -945,7 +1082,7 @@ int64_t		gao_init_resources(struct gao_resources *resources) {
 
 	if(gao_init_grid_allocator(&resources->grid_allocator)) goto err;
 
-	if(gao_init_queue_waitlist(&resources->waitlist)) goto err;
+	gao_init_queue_set(&resources->rx_waitlist);
 
 	if(gao_init_ports(resources)) goto err;
 

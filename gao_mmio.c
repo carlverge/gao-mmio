@@ -225,9 +225,13 @@ void gao_tx_interrupt_handle(int ifindex) {
 
 	log_dp("Handling tx interrupt for if/q (%d/%u)", ifindex, 0);
 
+	rcu_read_lock();
+
+	txq = gao_rcu_get_txq_ifindex(ifindex, 0);
+	if(unlikely(!txq)) goto done;
+
 	port = gao_ifindex_to_port(ifindex);
-	if(unlikely(!txq)) return;
-	if(unlikely(txq->state != GAO_RESOURCE_STATE_ACTIVE)) return;
+	if(unlikely(!port)) goto done;
 
 	if(spin_trylock(&txq->lock)) {
 
@@ -237,7 +241,8 @@ void gao_tx_interrupt_handle(int ifindex) {
 		spin_unlock(&txq->lock);
 	}
 
-
+	done:
+	rcu_read_unlock();
 }
 EXPORT_SYMBOL(gao_tx_interrupt_handle);
 
@@ -387,26 +392,26 @@ static inline void gao_drop_grid(struct gao_grid *grid) {
 
 
 
-static inline void gao_add_pending_rx_queue(struct gao_rx_queue* rxq) {
-	unsigned long	flags = 0;
-
-	spin_lock_irqsave(&gao_global_resources.waitlist.lock, flags);
-
-	if(!rxq->pending_read) {
-		rxq->pending_read = 1;
-		if(unlikely(gao_ll_push(gao_global_resources.waitlist.rxq_list, rxq))) {
-			log_bug("Overflowed rx waitlist");
-		} else {
-			if(gao_global_resources.waitlist.is_blocking) {
-				gao_global_resources.waitlist.is_blocking = 0;
-				wake_up_interruptible(&gao_global_resources.waitlist.rxq_wait);
-				log_dp("Woke the rx wakelist");
-			}
-		}
-	}
-
-	spin_unlock_irqrestore(&gao_global_resources.waitlist.lock, flags);
-}
+//static inline void gao_add_pending_rx_queue(struct gao_rx_queue* rxq) {
+//	unsigned long	flags = 0;
+//
+//	spin_lock_irqsave(&gao_global_resources.waitlist.lock, flags);
+//
+//	if(!rxq->pending_read) {
+//		rxq->pending_read = 1;
+//		if(unlikely(gao_ll_push(gao_global_resources.waitlist.rxq_list, rxq))) {
+//			log_bug("Overflowed rx waitlist");
+//		} else {
+//			if(gao_global_resources.waitlist.is_blocking) {
+//				gao_global_resources.waitlist.is_blocking = 0;
+//				wake_up_interruptible(&gao_global_resources.waitlist.rxq_wait);
+//				log_dp("Woke the rx wakelist");
+//			}
+//		}
+//	}
+//
+//	spin_unlock_irqrestore(&gao_global_resources.waitlist.lock, flags);
+//}
 
 
 /**
@@ -427,16 +432,16 @@ static inline int32_t	gao_rx_into_ring(struct gao_rx_queue* rxq) {
 	if(num_read > 0) rxq->ring.clean += num_read;
 	log_debug("done recv: fwd=%u clean=%u use=%u avail=%u", forward, rxq->ring.clean, rxq->ring.use, avail);
 
-
+	//Clean from use to avail
 	num_cleaned = gao_global_resources.ports[rxq->port_id].port_ops->gao_clean(&rxq->ring, (avail - rxq->ring.use), rxq->hw_private);
 	if(num_cleaned > 0) rxq->ring.use += num_cleaned;
 
-	gao_global_resources.ports[rxq->port_id].port_ops->gao_enable_rx_intr(rxq);
 
-	//Clean from use to avail
 	if(unlikely((avail - rxq->ring.use) == 0)) {
 		log_warn("rxq is starving!");
-		rxq->starving = 1;
+		atomic_set(&rxq->starving, 1);
+	} else {
+		gao_global_resources.ports[rxq->port_id].port_ops->gao_enable_rx_intr(rxq);
 	}
 
 	log_debug("done clean: fwd=%u clean=%u use=%u avail=%u", forward, rxq->ring.clean, rxq->ring.use, avail);
@@ -464,8 +469,11 @@ static inline int32_t 	gao_rx_into_grid(struct gao_rx_queue* rxq, struct gao_gri
 	log_debug("rx to grid: fwd=%u clean=%u use=%u avail=%u num_to_forward=%u",
 			rxq->ring.forward, clean, use, rxq->ring.avail, num_to_forward);
 
-	if(!num_to_forward)
-		gao_bug_val(-EAGAIN, "rx into grid got no pkts");
+	if(!num_to_forward) {
+		return -EAGAIN;
+		//gao_bug_val(-EAGAIN, "rx into grid got no pkts");
+	}
+
 
 	//Put the descriptors into the grid
 	for(i = 0; i < num_to_forward; i++) {
@@ -483,14 +491,25 @@ static inline int32_t 	gao_rx_into_grid(struct gao_rx_queue* rxq, struct gao_gri
 		log_debug("done refill: fwd=%u clean=%u use=%u avail=%u", rxq->ring.forward, clean, use, rxq->ring.avail);
 	}
 
+	//Make sure that any modifications to the queue are seen before checking for starvation
+	barrier();
+	if(atomic_read(&rxq->starving)) {
+		//If the queue previously had no resources, then it has stopped. Give it a jump start.
+		//XXX: If the spinlock is to be removed, there must be a guarantee that the interrupt cannot occur.
+		gao_rx_into_ring(rxq);
+		gao_global_resources.ports[rxq->port_id].port_ops->gao_enable_rx_intr(rxq);
+		atomic_set(&rxq->starving, 0);
+		//FIXME: If we were completely out of descriptors, the queue is still stalled
+		log_warn("rx into grid saved starving queue");
+	}
+
+
 	grid->header.gao_ifindex = rxq->port_id;
 	grid->header.queue_idx = rxq->id;
 	grid->header.count = num_to_forward;
 	log_debug("rx to grid done: id=%hhu count=%u port=%u qid=%u", grid->header.id, grid->header.count, grid->header.gao_ifindex, grid->header.queue_idx);
 
 	return 0;
-	err:
-	return ret;
 }
 
 
@@ -510,41 +529,45 @@ long gao_ioctl_send_grid(struct file *filep) {
 }
 
 
-/**
- * FIXME: This whole system is bunk, also when queues are being deleted we will need to delete them in here
- * refcount on the queues?
- * @return
- */
-static inline struct gao_rx_queue* gao_get_pending_rx_queue(void) {
-	struct gao_rx_queue* rxq = NULL;
-	unsigned long flags = 0;
+///**
+// * FIXME: This whole system is bunk, also when queues are being deleted we will need to delete them in here
+// * FIXED
+// * refcount on the queues?
+// * @return
+// */
+//static inline struct gao_rx_queue* gao_get_pending_rx_queue(void) {
+//	struct gao_rx_queue* rxq = NULL;
+//	unsigned long flags = 0;
+//
+//	read_again:
+//	spin_lock_irqsave(&gao_global_resources.waitlist.lock, flags);
+//	rxq = gao_ll_remove(gao_global_resources.waitlist.rxq_list);
+//	if(!rxq) gao_global_resources.waitlist.is_blocking = 1;
+//	else {
+//		rxq->pending_read = 0;
+//		gao_global_resources.waitlist.is_blocking = 0;
+//	}
+//	spin_unlock_irqrestore(&gao_global_resources.waitlist.lock, flags);
+//
+//	if(!rxq) {
+//		if(wait_event_interruptible(gao_global_resources.waitlist.rxq_wait, !gao_global_resources.waitlist.is_blocking)) {
+//			return NULL;
+//		} else {
+//			goto read_again;
+//		}
+//	}
+//
+//	return rxq;
+//}
 
-	read_again:
-	spin_lock_irqsave(&gao_global_resources.waitlist.lock, flags);
-	rxq = gao_ll_remove(gao_global_resources.waitlist.rxq_list);
-	if(!rxq) gao_global_resources.waitlist.is_blocking = 1;
-	else {
-		rxq->pending_read = 0;
-		gao_global_resources.waitlist.is_blocking = 0;
-	}
-	spin_unlock_irqrestore(&gao_global_resources.waitlist.lock, flags);
 
-	if(!rxq) {
-		if(wait_event_interruptible(gao_global_resources.waitlist.rxq_wait, !gao_global_resources.waitlist.is_blocking)) {
-			return NULL;
-		} else {
-			goto read_again;
-		}
-	}
-
-	return rxq;
-}
 
 
 long gao_ioctl_recv_grid(struct file *filep) {
 	int32_t ret = 0;
 	struct gao_grid* grid = NULL;
 	struct gao_rx_queue* rxq = NULL;
+	struct gao_hw_queue hwq;
 	struct gao_file_private* gao_file = filep->private_data;
 
 	if(unlikely(gao_file->grid)) gao_error_val(-EBUSY, "recv grid: already own a grid");
@@ -556,15 +579,27 @@ long gao_ioctl_recv_grid(struct file *filep) {
 	read_again:
 	log_debug("recv grid: polling for rx queue...");
 
-	rxq = gao_get_pending_rx_queue();
-	if(unlikely(!rxq)) {
+	ret = gao_queue_set_get(&gao_global_resources.rx_waitlist, &hwq);
+
+	if(unlikely(ret)) {
 		gao_grid_return(&gao_global_resources.grid_allocator, grid);
 		gao_error_val(-EINTR, "read interrupted or failed");
+	}
+
+	rcu_read_lock();
+	rxq = gao_rcu_get_rxq(hwq.port_id, hwq.id);
+
+	if(!rxq) {
+		rcu_read_unlock();
+		log_error("got null queue on read");
+		goto read_again;
 	}
 
 
 	log_debug("Got rxq port/q (%u/%u)", rxq->port_id, rxq->id);
 	ret = gao_rx_into_grid(rxq, grid);
+	rcu_read_unlock();
+
 	if(ret) {
 		log_debug("reading into grid failed: ret=%d", ret);
 		goto read_again;
@@ -594,16 +629,31 @@ void	gao_rx_interrupt_handle(int ifindex, uint32_t qid) {
 
 	log_dp("Handling rx interrupt for if/q (%d/%u)", ifindex, qid);
 
-	//Bounds check the indicies. The memory is statically allocated.
-	if(unlikely( (((uint32_t)ifindex) > GAO_MAX_IFINDEX) || (qid > GAO_MAX_PORT_HWQUEUE) )) return;
+	rcu_read_lock();
+	rxq = gao_rcu_get_rxq_ifindex(ifindex, qid);
 
-	rxq = gao_global_resources.ifindex_to_port_lut[((uint32_t)ifindex)]->rx_queues[qid];
-	if(unlikely(!rxq)) return;
-	if(unlikely(rxq->state != GAO_RESOURCE_STATE_ACTIVE)) return;
+	if(!rxq) {
+		rcu_read_unlock();
+		log_debug("intr found null queue");
+		return;
+	}
 
 	gao_global_resources.ports[rxq->port_id].port_ops->gao_disable_rx_intr(rxq);
-	gao_rx_into_ring(rxq);
-	gao_add_pending_rx_queue(rxq);
+
+//	if(spin_trylock(&rxq->lock)) {
+//		gao_rx_into_ring(rxq);
+//		spin_unlock(&rxq->lock);
+//	}
+
+	if(!atomic_read(&rxq->starving)) {
+		gao_rx_into_ring(rxq);
+	} else {
+		log_bug("rx intr during starvation");
+	}
+
+	gao_queue_set_add(&gao_global_resources.rx_waitlist, rxq->port_id, rxq->id);
+
+	rcu_read_unlock();
 
 	return;
 }
@@ -660,6 +710,10 @@ long gao_ioctl (struct file *filep, unsigned int command, unsigned long argument
 	case GAO_IOCTL_COMMAND_PORT:
 		if(!argument_ptr) gao_error_val(-EFAULT, "IOCTL: Null argument pointer.");
 		ret = gao_ioctl_handle_port(filep, argument_ptr);
+		break;
+
+	case GAO_IOCTL_DUMP_RESC:
+		gao_dump_resources();
 		break;
 
 	default:

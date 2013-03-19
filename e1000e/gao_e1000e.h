@@ -147,7 +147,7 @@ static inline void _gao_e1000e_enable_rx_intr(struct e1000_adapter *adapter) {
 	struct e1000_hw *hw = &adapter->hw;
 	log_debug("Enabling RX interrupts");
 	//Enable the RX Timer interrupt
-	ew32(IMS, (E1000_IMS_RXT0 | E1000_IMS_RXQ0 | E1000_IMS_RXDMT0 | E1000_IMS_OTHER | E1000_IMS_LSC));
+	ew32(IMS, (E1000_IMS_RXT0 | E1000_IMS_RXO | E1000_IMS_RXQ0 | E1000_IMS_RXDMT0 | E1000_IMS_OTHER | E1000_IMS_LSC));
 	e1e_flush();
 }
 static void gao_e1000e_enable_rx_intr(struct gao_rx_queue* rxq) {

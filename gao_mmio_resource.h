@@ -331,6 +331,7 @@ static inline void	__gao_release_descriptors(struct gao_descriptor_allocator_rin
  * @param ring
  */
 static inline void gao_return_descriptors(struct gao_descriptor_allocator_ring *allocator, struct gao_descriptor_ring* ring) {
+	if(ring->clean == ring->forward) return; //ring is empty, return without locking anything
 	__gao_release_descriptors(allocator, ring, (ring->clean - ring->forward));
 }
 
@@ -342,6 +343,7 @@ static inline void gao_return_descriptors(struct gao_descriptor_allocator_ring *
  * @param ring
  */
 static inline void gao_empty_descriptors(struct gao_descriptor_allocator_ring *allocator, struct gao_descriptor_ring* ring) {
+	if(ring->avail == ring->forward) return; //ring is empty, return without locking anything
 	__gao_release_descriptors(allocator, ring, (ring->avail - ring->forward));
 }
 
@@ -356,11 +358,9 @@ struct gao_grid_allocator {
 struct gao_rx_queue {
 	uint32_t				id;
 	uint32_t				port_id;
-	gao_resource_state_t	state;
 	spinlock_t				lock;
 
-	uint16_t				starving; //If set, the queue ran out of descriptors and needs a kickoff again
-	uint16_t				pending_read; //The queue has descriptors pending read
+	atomic_t				starving; //If set, the queue ran out of descriptors and needs a kickoff again
 	//Pointer for drivers to store rings/adapter structs for quick access
 	void					*hw_private;
 
@@ -372,7 +372,6 @@ struct gao_rx_queue {
 struct gao_tx_queue {
 	uint32_t				id;
 	uint32_t				port_id;
-	gao_resource_state_t	state;
 	spinlock_t				lock;
 
 	//Pointer for drivers to store rings/adapter structs for quick access
@@ -483,6 +482,38 @@ struct gao_queue_waitlist {
 };
 
 
+struct gao_hw_queue {
+	uint32_t	port_id;
+	uint32_t	id;
+};
+
+/**
+ *
+ * 1. A FIFO queue with unique entries, and guaranteed success on add/remove.
+ * 2. A synchronization point for configuration (static index to pointers protected by RCU)
+ * 3. Safe from any context (including hard interrupts)
+ *
+ * While the struct is wasteful, the size is reasonably bounded, and it has good performance.
+ */
+struct gao_queue_set {
+	spinlock_t			lock;
+	wait_queue_head_t	wait;
+	uint32_t			waitcount;
+	uint8_t				set_queues[GAO_MAX_PORTS][GAO_MAX_PORT_HWQUEUE];
+	struct gao_hw_queue queues[GAO_MAX_PORTS*GAO_MAX_PORT_HWQUEUE];
+	uint32_t			avail; //Points to next slot to put queues in
+	uint32_t			use; //Points to next valid queue. If equal to avail queue is empty.
+};
+
+
+
+
+
+
+
+
+
+
 /**
  * The fabric applies actions to descriptors. It will forward
  * the descriptors to the appropriate queues and kick off schedulers
@@ -505,6 +536,8 @@ struct gao_fabric {
 	//Descriptors to be returned to allocator (from drops/etc)
 	struct gao_descriptor_ring* free_desc;
 };
+
+
 
 
 struct gao_file_private {
@@ -596,8 +629,7 @@ struct gao_resources {
 	struct gao_grid_allocator				grid_allocator;
 
 	/*Queues*/
-	//struct gao_queue			*queues[GAO_MAX_QUEUES];
-	struct gao_queue_waitlist	waitlist;
+	struct gao_queue_set		rx_waitlist;
 
 	struct gao_fabric			fabric;
 
@@ -707,6 +739,7 @@ struct gao_request_port {
 #define GAO_MAJOR_NUM	0x10
 #define GAO_IOCTL_COMMAND_GET_MMAP_SIZE _IOWR(GAO_MAJOR_NUM, 0x10, struct gao_request_mmap)
 #define GAO_IOCTL_COMMAND_PORT _IOWR(GAO_MAJOR_NUM, 0x12, struct gao_request_port)
+#define GAO_IOCTL_DUMP_RESC		_IO(GAO_MAJOR_NUM, 0x14)
 #define GAO_IOCTL_RECV_GRID		_IO(GAO_MAJOR_NUM, 0x15)
 #define GAO_IOCTL_SEND_GRID		_IO(GAO_MAJOR_NUM, 0x16)
 #define GAO_IOCTL_EXCH_GRID		_IO(GAO_MAJOR_NUM, 0x17)
@@ -723,6 +756,86 @@ static inline struct gao_port* gao_ifindex_to_port(int ifindex) {
 	if(unlikely((unsigned int)ifindex >= GAO_MAX_IFINDEX)) return NULL;
 	else return gao_global_resources.ifindex_to_port_lut[ifindex];
 }
+
+/**
+ * Get an RCU safe pointer to an rxq from its gao port_id and qid.
+ * @warning Pointer only valid under RCU lock
+ * @param port_id
+ * @param qid The hw queue id
+ * @return May return NULL if the queue is invalid or does not exist.
+ */
+static inline struct gao_rx_queue* gao_rcu_get_rxq(uint32_t port_id, uint32_t qid) {
+	struct gao_rx_queue* rxq = NULL;
+
+	if(unlikely( (port_id >= GAO_MAX_PORTS) || (qid >= GAO_MAX_PORT_HWQUEUE) ))
+		gao_error("get rxq: invalid port range");
+
+	rxq = rcu_dereference(gao_global_resources.ports[port_id].rx_queues[qid]);
+
+	err:
+	return rxq;
+}
+
+/**
+ * Get an RCU safe pointer to an rxq from its kernel ifindex and qid.
+ * @warning Pointer only valid under RCU lock
+ * @param ifindex The kernel ifindex of the port
+ * @param qid The hw queue id
+ * @return May return NULL if the queue is invalid or does not exist.
+ */
+static inline struct gao_rx_queue* gao_rcu_get_rxq_ifindex(int ifindex, uint32_t qid) {
+	struct gao_port* port;
+
+	if(unlikely(((unsigned int)ifindex) >= GAO_MAX_IFINDEX))
+		return NULL;
+
+	port = gao_global_resources.ifindex_to_port_lut[ifindex];
+
+	if(likely(port)) return gao_rcu_get_rxq(port->gao_ifindex, qid);
+	else return NULL;
+}
+
+/**
+ * Get an RCU safe pointer to a txq from its gao port_id and qid.
+ * @warning Pointer only valid under RCU lock
+ * @param port_id
+ * @param qid The hw queue id
+ * @return May return NULL if the queue is invalid or does not exist.
+ */
+static inline struct gao_tx_queue* gao_rcu_get_txq(uint32_t port_id, uint32_t qid) {
+	struct gao_tx_queue* txq = NULL;
+
+	if(unlikely( (port_id >= GAO_MAX_PORTS) || (qid >= GAO_MAX_PORT_HWQUEUE) ))
+		gao_error("get txq: invalid port range");
+
+	txq = rcu_dereference(gao_global_resources.ports[port_id].tx_queues[qid]);
+
+	err:
+	return txq;
+}
+
+/**
+ * Get an RCU safe pointer to a txq from its kernel ifindex and qid.
+ * @warning Pointer only valid under RCU lock
+ * @param ifindex The kernel ifindex of the port
+ * @param qid The hw queue id
+ * @return May return NULL if the queue is invalid or does not exist.
+ */
+static inline struct gao_tx_queue* gao_rcu_get_txq_ifindex(int ifindex, uint32_t qid) {
+	struct gao_port* port;
+
+	if(unlikely(((unsigned int)ifindex) >= GAO_MAX_IFINDEX))
+		return NULL;
+
+	port = gao_global_resources.ifindex_to_port_lut[ifindex];
+
+	if(likely(port)) return gao_rcu_get_txq(port->gao_ifindex, qid);
+	else return NULL;
+}
+
+
+
+
 
 static inline void __gao_validate_desc(struct gao_descriptor desc) {
 	if(unlikely(
@@ -777,6 +890,11 @@ int			gao_lock_file(struct gao_file_private *gao_file);
 
 void 		gao_grid_return(struct gao_grid_allocator *allocator, struct gao_grid* grid);
 struct gao_grid* gao_grid_get(struct gao_grid_allocator *allocator);
+
+void 		gao_queue_set_add(struct gao_queue_set* set, uint32_t port_id, uint32_t qid);
+void 		gao_queue_set_add_ifindex(struct gao_queue_set* set, int ifindex, uint32_t qid);
+int32_t 	gao_queue_set_get(struct gao_queue_set* set, struct gao_hw_queue* hwq);
+int32_t 	gao_queue_set_get_noblk(struct gao_queue_set* set, struct gao_hw_queue* hwq);
 
 /* Exported functions */
 int			gao_lock_resources(struct gao_resources* resources);
