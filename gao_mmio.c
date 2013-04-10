@@ -113,7 +113,8 @@ int gao_mmap(struct file* filep, struct vm_area_struct* vma) {
 		queue_vm_addr = queue->descriptor_pipeline;
 		while(queue_vm_addr < (((void*)queue->descriptor_pipeline) + queue->descriptor_pipeline_size)) {
 			pfn = vmalloc_to_pfn(queue_vm_addr);
-			ret = remap_pfn_range(vma, vm_addr, pfn, PAGE_SIZE, vma->vm_page_prot);
+			//ret = remap_pfn_range(vma, vm_addr, pfn, PAGE_SIZE, vma->vm_page_prot);
+			ret = vm_insert_page(vma, vm_addr, pfn_to_page(pfn));
 			if(ret) gao_error("Failed to MMAP queue page to userspace: %d (addr %p)", ret, queue_vm_addr);
 
 			queue_vm_addr += PAGE_SIZE;
@@ -124,7 +125,8 @@ int gao_mmap(struct file* filep, struct vm_area_struct* vma) {
 		queue_vm_addr = queue->action_pipeline;
 		while(queue_vm_addr < (((void*)queue->action_pipeline) + queue->action_pipeline_size)) {
 			pfn = vmalloc_to_pfn(queue_vm_addr);
-			ret = remap_pfn_range(vma, vm_addr, pfn, PAGE_SIZE, vma->vm_page_prot);
+//			ret = remap_pfn_range(vma, vm_addr, pfn, PAGE_SIZE, vma->vm_page_prot);
+			ret = vm_insert_page(vma, vm_addr, pfn_to_page(pfn));
 			if(ret) gao_error("Failed to MMAP queue page to userspace: %d (addr %p)", ret, queue_vm_addr);
 
 			queue_vm_addr += PAGE_SIZE;
@@ -391,14 +393,14 @@ static void	gao_forward_frames(struct gao_queue* queue, uint64_t num_to_forward)
 		switch(action->action_id) {
 
 		case GAO_ACTION_DROP:
-			log_error("fwd drop: action_id is drop");
+//			log_error("fwd drop: action_id is drop");
 			continue;
 
 		case GAO_ACTION_FWD:
 			dest_queue = queue->queue_map.port[action->fwd.dport].ring[action->fwd.dqueue];
 
 			if(unlikely(!dest_queue)) {
-				log_error("fwd drop: null dest queue");
+//				log_error("fwd drop: null dest queue");
 				continue;
 			}
 
@@ -406,7 +408,7 @@ static void	gao_forward_frames(struct gao_queue* queue, uint64_t num_to_forward)
 
 
 			if(!gao_ring_slots_left(dest_queue)) {
-				log_error("fwd drop: no slots left");
+//				log_error("fwd drop: no slots left");
 				gao_unlock_subqueue(dest_queue);
 				continue;
 			}
@@ -432,7 +434,7 @@ static void	gao_forward_frames(struct gao_queue* queue, uint64_t num_to_forward)
 			break;
 
 		default:
-			log_bug("fwd drop: invalid action=%#04hhx", action->action_id);
+//			log_bug("fwd drop: invalid action=%#04hhx", action->action_id);
 			break;
 
 		}
