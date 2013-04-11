@@ -1450,7 +1450,11 @@ static bool e1000_clean_tx_irq(struct e1000_ring *tx_ring)
 	unsigned int total_tx_bytes = 0, total_tx_packets = 0;
 	unsigned int bytes_compl = 0, pkts_compl = 0;
 
-
+#ifdef GAO_E1000E_H_
+	if(netdev->priv_flags & IFF_GAO_ENABLED) {
+		return true;
+	}
+#endif
 
 	i = tx_ring->next_to_clean;
 	eop = tx_ring->buffer_info[i].next_to_watch;
@@ -2268,13 +2272,13 @@ static irqreturn_t e1000_intr_msix_rx(int irq, void *data)
 	struct e1000_hw *hw = &adapter->hw;
 #endif
 
-#ifdef GAO_E1000E_H_
-	if(adapter->netdev->priv_flags & IFF_GAO_ENABLED) {
-		//log_dp("RX Intr IMS: %x", er32(IMS));
-		gao_e1000e_handle_rx_irq(netdev, adapter, rx_ring);
-		return IRQ_HANDLED;
-	}
-#endif
+//#ifdef GAO_E1000E_H_
+//	if(adapter->netdev->priv_flags & IFF_GAO_ENABLED) {
+//		//log_dp("RX Intr IMS: %x", er32(IMS));
+//		gao_e1000e_handle_rx_irq(netdev, adapter, rx_ring);
+//		return IRQ_HANDLED;
+//	}
+//#endif
 
 	/* Write the ITR value calculated at the end of the
 	 * previous interrupt.
@@ -2587,13 +2591,13 @@ static void e1000_irq_enable(struct e1000_adapter *adapter)
 	struct e1000_hw *hw = &adapter->hw;
 
 
-#ifdef GAO_E1000E_H_
-	if(adapter->netdev->priv_flags & IFF_GAO_ENABLED) {
-		ew32(IMS, E1000_IMS_OTHER | E1000_IMS_LSC /*| E1000_EIAC_MASK_82574*/);
-		e1e_flush();
-		return;
-	}
-#endif
+//#ifdef GAO_E1000E_H_
+//	if(adapter->netdev->priv_flags & IFF_GAO_ENABLED) {
+//		ew32(IMS, E1000_IMS_OTHER | E1000_IMS_LSC /*| E1000_EIAC_MASK_82574*/);
+//		e1e_flush();
+//		return;
+//	}
+//#endif
 
 	if (adapter->msix_entries) {
 		ew32(EIAC_82574, adapter->eiac_mask & E1000_EIAC_MASK_82574);
@@ -3051,9 +3055,12 @@ static int e1000e_poll(struct napi_struct *napi, int weight)
 
 	adapter = netdev_priv(poll_dev);
 
+
 	if (!adapter->msix_entries ||
-	    (adapter->rx_ring->ims_val & adapter->tx_ring->ims_val))
+	    (adapter->rx_ring->ims_val & adapter->tx_ring->ims_val)) {
 		tx_cleaned = e1000_clean_tx_irq(adapter->tx_ring);
+	}
+
 
 	adapter->clean_rx(adapter->rx_ring, &work_done, weight);
 

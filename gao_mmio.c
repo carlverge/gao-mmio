@@ -335,6 +335,7 @@ void	gao_fabric_task(unsigned long data) {
 			gao_empty_descriptors(&gao_global_resources.descriptor_allocator, ring);
 		}
 
+		grid->header.count = 0;
 		gao_grid_return(&gao_global_resources.grid_allocator, grid);
 	}
 
@@ -414,6 +415,43 @@ static inline void gao_drop_grid(struct gao_grid *grid) {
 //}
 
 
+
+/**
+ *
+ * @param rxq
+ * @return The number of frames in the queue's grid
+ */
+static inline int32_t gao_rx_clean_ring(struct gao_rx_queue* rxq) {
+	int32_t	num_read, num_cleaned;
+	struct gao_grid *grid = rxq->grid;
+
+	log_debug("start recv: fwd=%u clean=%u use=%u avail=%u", rxq->ring.forward, rxq->ring.clean, rxq->ring.use, rxq->ring.avail);
+	//Recv from clean to use
+	num_read = gao_global_resources.ports[rxq->port_id].port_ops->gao_recv(&rxq->ring, (rxq->ring.use - rxq->ring.clean), rxq->hw_private);
+	if(num_read > 0) rxq->ring.clean += num_read;
+	log_debug("done recv: fwd=%u clean=%u use=%u avail=%u", rxq->ring.forward, rxq->ring.clean, rxq->ring.use, rxq->ring.avail);
+
+	//Clean from use to avail
+	num_cleaned = gao_global_resources.ports[rxq->port_id].port_ops->gao_clean(&rxq->ring, (rxq->ring.avail - rxq->ring.use), rxq->hw_private);
+	if(num_cleaned > 0) rxq->ring.use += num_cleaned;
+
+	log_debug("done clean: fwd=%u clean=%u use=%u avail=%u", rxq->ring.forward, rxq->ring.clean, rxq->ring.use, rxq->ring.avail);
+
+	//Put the descriptors into the grid
+	while((rxq->ring.forward < rxq->ring.clean) && (grid->header.count < GAO_GRID_SIZE)) {
+		grid->desc[grid->header.count] = rxq->ring.desc[rxq->ring.forward & rxq->ring.mask];
+		grid->header.count++, rxq->ring.forward++;
+	}
+	log_debug("done rx to grid: fwd=%u clean=%u use=%u avail=%u grid_count=%hu", rxq->ring.forward, rxq->ring.clean, rxq->ring.use, rxq->ring.avail, grid->header.count);
+
+	if(rxq->ring.capacity - (rxq->ring.avail - rxq->ring.forward))
+		gao_refill_descriptors(&gao_global_resources.descriptor_allocator, &rxq->ring);
+
+	log_debug("done refill: fwd=%u clean=%u use=%u avail=%u", rxq->ring.forward, rxq->ring.clean, rxq->ring.use, rxq->ring.avail);
+
+	return grid->header.count;
+}
+
 /**
  * Receive new descriptors from the NIC and refill empty descriptor slots.
  * @warning Called from interrupt context
@@ -447,6 +485,8 @@ static inline int32_t	gao_rx_into_ring(struct gao_rx_queue* rxq) {
 	log_debug("done clean: fwd=%u clean=%u use=%u avail=%u", forward, rxq->ring.clean, rxq->ring.use, avail);
 
 
+
+
 	return 0;
 }
 
@@ -457,60 +497,72 @@ static inline int32_t	gao_rx_into_ring(struct gao_rx_queue* rxq) {
  * @param grid
  * @return
  */
-static inline int32_t 	gao_rx_into_grid(struct gao_rx_queue* rxq, struct gao_grid* grid) {
-	int32_t ret = 0, num_to_forward, i;
-	uint32_t use = ACCESS_ONCE(rxq->ring.use), clean = ACCESS_ONCE(rxq->ring.clean);
+static inline int32_t 	gao_rx_into_grid(struct gao_rx_queue *rxq, struct gao_grid **grid) {
+	struct gao_grid *tmp_grid = *grid;
 
-	log_dp("rx to grid start: port/q (%u/%u) into grid %hhu", rxq->port_id, rxq->id, grid->header.id);
-	//spin_lock(&rxq->lock);
+	spin_lock_bh(&rxq->lock);
 
-	num_to_forward = (clean - rxq->ring.forward);
+	*grid = rxq->grid;
+	rxq->grid = tmp_grid;
 
-	log_debug("rx to grid: fwd=%u clean=%u use=%u avail=%u num_to_forward=%u",
-			rxq->ring.forward, clean, use, rxq->ring.avail, num_to_forward);
-
-	if(!num_to_forward) {
-		return -EAGAIN;
-		//gao_bug_val(-EAGAIN, "rx into grid got no pkts");
-	}
-
-
-	//Put the descriptors into the grid
-	for(i = 0; i < num_to_forward; i++) {
-		grid->desc[i] = rxq->ring.desc[rxq->ring.forward & rxq->ring.mask];
-		rxq->ring.forward++;
-	}
-	log_debug("rx to grid: fwd=%u clean=%u use=%u avail=%u", rxq->ring.forward, clean, use, rxq->ring.avail);
-
-	//Refill the ring's descriptors for rxq cleaning
-	if((rxq->ring.avail - rxq->ring.forward) < rxq->ring.capacity) {
-		if(unlikely(!gao_refill_descriptors(&gao_global_resources.descriptor_allocator, &rxq->ring))) {
-			log_bug("DESCRIPTOR GOOF: Ran out of descriptors globally");
-			gao_dump_resources();
-		}
-		log_debug("done refill: fwd=%u clean=%u use=%u avail=%u", rxq->ring.forward, clean, use, rxq->ring.avail);
-	}
-
-	//Make sure that any modifications to the queue are seen before checking for starvation
-	barrier();
-	if(atomic_read(&rxq->starving)) {
-		//If the queue previously had no resources, then it has stopped. Give it a jump start.
-		//XXX: If the spinlock is to be removed, there must be a guarantee that the interrupt cannot occur.
-		gao_rx_into_ring(rxq);
-		gao_global_resources.ports[rxq->port_id].port_ops->gao_enable_rx_intr(rxq);
-		atomic_set(&rxq->starving, 0);
-		//FIXME: If we were completely out of descriptors, the queue is still stalled
-		log_warn("rx into grid saved starving queue");
-	}
-
-
-	grid->header.gao_ifindex = rxq->port_id;
-	grid->header.queue_idx = rxq->id;
-	grid->header.count = num_to_forward;
-	log_debug("rx to grid done: id=%hhu count=%u port=%u qid=%u", grid->header.id, grid->header.count, grid->header.gao_ifindex, grid->header.queue_idx);
+	spin_unlock_bh(&rxq->lock);
 
 	return 0;
 }
+//static inline int32_t 	gao_rx_into_grid(struct gao_rx_queue* rxq, struct gao_grid* grid) {
+//	int32_t ret = 0, num_to_forward, i;
+//	uint32_t use = ACCESS_ONCE(rxq->ring.use), clean = ACCESS_ONCE(rxq->ring.clean);
+//
+//	log_dp("rx to grid start: port/q (%u/%u) into grid %hhu", rxq->port_id, rxq->id, grid->header.id);
+//	//spin_lock(&rxq->lock);
+//
+//	num_to_forward = (clean - rxq->ring.forward);
+//
+//	log_debug("rx to grid: fwd=%u clean=%u use=%u avail=%u num_to_forward=%u",
+//			rxq->ring.forward, clean, use, rxq->ring.avail, num_to_forward);
+//
+//	if(!num_to_forward) {
+//		return -EAGAIN;
+//		//gao_bug_val(-EAGAIN, "rx into grid got no pkts");
+//	}
+//
+//
+//	//Put the descriptors into the grid
+//	for(i = 0; i < num_to_forward; i++) {
+//		grid->desc[i] = rxq->ring.desc[rxq->ring.forward & rxq->ring.mask];
+//		rxq->ring.forward++;
+//	}
+//	log_debug("rx to grid: fwd=%u clean=%u use=%u avail=%u", rxq->ring.forward, clean, use, rxq->ring.avail);
+//
+//	//Refill the ring's descriptors for rxq cleaning
+//	if((rxq->ring.avail - rxq->ring.forward) < rxq->ring.capacity) {
+//		if(unlikely(!gao_refill_descriptors(&gao_global_resources.descriptor_allocator, &rxq->ring))) {
+//			log_bug("DESCRIPTOR GOOF: Ran out of descriptors globally");
+//			gao_dump_resources();
+//		}
+//		log_debug("done refill: fwd=%u clean=%u use=%u avail=%u", rxq->ring.forward, clean, use, rxq->ring.avail);
+//	}
+//
+//	//Make sure that any modifications to the queue are seen before checking for starvation
+//	barrier();
+//	if(atomic_read(&rxq->starving)) {
+//		//If the queue previously had no resources, then it has stopped. Give it a jump start.
+//		//XXX: If the spinlock is to be removed, there must be a guarantee that the interrupt cannot occur.
+//		gao_rx_into_ring(rxq);
+//		gao_global_resources.ports[rxq->port_id].port_ops->gao_enable_rx_intr(rxq);
+//		atomic_set(&rxq->starving, 0);
+//		//FIXME: If we were completely out of descriptors, the queue is still stalled
+//		log_warn("rx into grid saved starving queue");
+//	}
+//
+//
+//	grid->header.gao_ifindex = rxq->port_id;
+//	grid->header.queue_idx = rxq->id;
+//	grid->header.count = num_to_forward;
+//	log_debug("rx to grid done: id=%hhu count=%u port=%u qid=%u", grid->header.id, grid->header.count, grid->header.gao_ifindex, grid->header.queue_idx);
+//
+//	return 0;
+//}
 
 
 
@@ -527,39 +579,6 @@ long gao_ioctl_send_grid(struct file *filep) {
 
 	return 0;
 }
-
-
-///**
-// * FIXME: This whole system is bunk, also when queues are being deleted we will need to delete them in here
-// * FIXED
-// * refcount on the queues?
-// * @return
-// */
-//static inline struct gao_rx_queue* gao_get_pending_rx_queue(void) {
-//	struct gao_rx_queue* rxq = NULL;
-//	unsigned long flags = 0;
-//
-//	read_again:
-//	spin_lock_irqsave(&gao_global_resources.waitlist.lock, flags);
-//	rxq = gao_ll_remove(gao_global_resources.waitlist.rxq_list);
-//	if(!rxq) gao_global_resources.waitlist.is_blocking = 1;
-//	else {
-//		rxq->pending_read = 0;
-//		gao_global_resources.waitlist.is_blocking = 0;
-//	}
-//	spin_unlock_irqrestore(&gao_global_resources.waitlist.lock, flags);
-//
-//	if(!rxq) {
-//		if(wait_event_interruptible(gao_global_resources.waitlist.rxq_wait, !gao_global_resources.waitlist.is_blocking)) {
-//			return NULL;
-//		} else {
-//			goto read_again;
-//		}
-//	}
-//
-//	return rxq;
-//}
-
 
 
 
@@ -591,13 +610,12 @@ long gao_ioctl_recv_grid(struct file *filep) {
 
 	if(!rxq) {
 		rcu_read_unlock();
-		log_error("got null queue on read");
+		log_bug("got null queue on read");
 		goto read_again;
 	}
 
-
 	log_debug("Got rxq port/q (%u/%u)", rxq->port_id, rxq->id);
-	ret = gao_rx_into_grid(rxq, grid);
+	ret = gao_rx_into_grid(rxq, &grid);
 	rcu_read_unlock();
 
 	if(ret) {
@@ -616,7 +634,27 @@ long gao_ioctl_recv_grid(struct file *filep) {
 
 
 
+void	gao_rx_clean(int ifindex, uint32_t qid) {
+	struct gao_rx_queue *rxq = NULL;
 
+	log_dp("Handling rx clean for if/q (%d/%u)", ifindex, qid);
+
+	rcu_read_lock();
+	rxq = gao_rcu_get_rxq_ifindex(ifindex, qid);
+
+	if(unlikely(!rxq)) {
+		rcu_read_unlock();
+		log_debug("rx clean found null queue");
+		return;
+	}
+
+	if(gao_rx_clean_ring(rxq))
+		gao_queue_set_add(&gao_global_resources.rx_waitlist, rxq->port_id, rxq->id);
+
+	rcu_read_unlock();
+	return;
+}
+EXPORT_SYMBOL(gao_rx_clean);
 
 /**
  * Post the rx queue as pending receive

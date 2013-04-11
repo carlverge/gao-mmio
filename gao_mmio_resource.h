@@ -324,6 +324,61 @@ static inline void	__gao_release_descriptors(struct gao_descriptor_allocator_rin
 	return;
 }
 
+
+
+static inline void	gao_release_grid_descriptors(struct gao_descriptor_allocator_ring *allocator, struct gao_grid *grid) {
+	//struct gao_descriptor_allocator_ring *ring = &gao_get_resources()->descriptor_ring;
+	uint32_t num_left = grid->header.count, avail, start_avail;
+
+	//First lock to reserve return space
+	gao_lock_descriptor_allocator(allocator);
+
+	start_avail = allocator->max_avail;
+	avail = allocator->max_avail;
+
+	//The number of outstanding copies in progress by returners
+	allocator->return_delta += grid->header.count;
+	//The max reserved but uncommited index
+	allocator->max_avail += grid->header.count;
+
+	//Check for logging purposes, we can't do anything about it, though. XXX: Crash here?
+	if(unlikely( (allocator->max_avail - allocator->use) > GAO_DESCRIPTORS) ) {
+		log_bug("DESCRIPTOR GOOF: Somebody is making up descriptors! grid=%p avail=%u max_avail=%u num_to_copy=%u delta=%u",
+				grid, allocator->avail, allocator->max_avail, grid->header.count, allocator->return_delta);
+	}
+
+	log_debug("return desc start: avail=%u max_avail=%u num_to_copy=%u delta=%u", allocator->avail, allocator->max_avail, grid->header.count, allocator->return_delta);
+	gao_unlock_descriptor_ring(allocator);
+
+	//Perform the descriptor transfer
+	while(num_left--) {
+		GAO_VALIDATE_DESC(grid->desc[num_left]);
+		allocator->descriptors[avail & (GAO_DESCRIPTORS-1)] = grid->desc[num_left];
+		avail++;
+	}
+
+	//Second lock to commit the reservation
+	gao_lock_descriptor_allocator(allocator);
+
+	allocator->return_delta -= grid->header.count;
+
+	if(!allocator->return_delta) {
+		//All of the transfers are finished, commit everything.
+		allocator->avail = allocator->max_avail;
+	} else if (allocator->avail == start_avail) {
+		//Not at transfers done, but we are the bottom of the commit chain
+		//So advance the avail up what we transferred.
+		allocator->avail = avail;
+	}
+	log_debug("return desc done: use=%u avail=%u max_avail=%u num_to_copy=%u delta=%u total_desc=%u",
+			allocator->use, allocator->avail, allocator->max_avail, grid->header.count, allocator->return_delta, allocator->avail - allocator->use);
+	gao_unlock_descriptor_ring(allocator);
+
+	return;
+}
+
+
+
 /**
  * Return empty descriptors back to the descriptor ring. Uses the forward
  * index in the ring to begin returning. Will return up to the clean index.
@@ -364,7 +419,9 @@ struct gao_rx_queue {
 	//Pointer for drivers to store rings/adapter structs for quick access
 	void					*hw_private;
 
-	struct gao_descriptor_ring ring;
+	struct gao_grid				*grid;
+
+	struct gao_descriptor_ring 	ring;
 };
 
 
@@ -907,6 +964,7 @@ void		gao_deactivate_port(struct gao_port* port);
 
 char*		gao_get_port_name(struct gao_port* port);
 
+void		gao_rx_clean(int ifindex, uint32_t qid);
 void		gao_rx_interrupt_handle(int ifindex, uint32_t qid);
 void 		gao_tx_interrupt_handle(int ifindex);
 

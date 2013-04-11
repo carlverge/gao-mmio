@@ -513,6 +513,7 @@ static int64_t	gao_init_grid_allocator(struct gao_grid_allocator *allocator) {
 	return -ENOMEM;
 }
 
+
 void gao_grid_return(struct gao_grid_allocator *allocator, struct gao_grid* grid) {
 
 	if(!allocator || !grid) {
@@ -523,6 +524,11 @@ void gao_grid_return(struct gao_grid_allocator *allocator, struct gao_grid* grid
 	gao_lock_grid_allocator(allocator);
 
 	if(unlikely(allocator->count == GAO_GRIDS)) gao_bug("Already at max grids, cant return!");
+
+	if(grid->header.count) {
+		log_debug("Releasing %hu descriptors from grid", grid->header.count);
+		gao_release_grid_descriptors(&gao_global_resources.descriptor_allocator, grid);
+	}
 
 	allocator->grid_stack[allocator->count] = grid;
 	allocator->count++;
@@ -572,12 +578,11 @@ static void gao_init_queue_set(struct gao_queue_set* set) {
  * @param qid The HW qid.
  */
 void gao_queue_set_add(struct gao_queue_set* set, uint32_t port_id, uint32_t qid) {
-	unsigned long flags = 0;
 
 	if(unlikely( (port_id >= GAO_MAX_PORTS) || (qid >= GAO_MAX_PORT_HWQUEUE) ))
 		return;
 
-	spin_lock_irqsave(&set->lock, flags);
+	spin_lock_bh(&set->lock);
 
 	if(unlikely( (set->avail-set->use) > (GAO_MAX_PORTS*GAO_MAX_PORT_HWQUEUE) ))
 		log_bug("Queue set at %p overflowed", set);
@@ -593,7 +598,7 @@ void gao_queue_set_add(struct gao_queue_set* set, uint32_t port_id, uint32_t qid
 		wake_up_interruptible(&set->wait);
 	}
 
-	spin_unlock_irqrestore(&set->lock, flags);
+	spin_unlock_bh(&set->lock);
 }
 
 void gao_queue_set_add_ifindex(struct gao_queue_set* set, int ifindex, uint32_t qid) {
@@ -615,29 +620,27 @@ void gao_queue_set_add_ifindex(struct gao_queue_set* set, int ifindex, uint32_t 
  * @return -EINTR if interrupted, 0 on success.
  */
 int32_t gao_queue_set_get(struct gao_queue_set* set, struct gao_hw_queue* hwq) {
-	unsigned long flags = 0;
 	int32_t	ret = 0;
 	uint32_t port_id, qid;
 
-	spin_lock_irqsave(&set->lock, flags);
+	spin_lock_bh(&set->lock);
 
 	while((set->avail == set->use) && !ret) {
 		set->waitcount++;
-		spin_unlock_irqrestore(&set->lock, flags);
+		spin_unlock_bh(&set->lock);
 
 		if(wait_event_interruptible(set->wait, (set->avail > set->use))) {
-			spin_lock_irqsave(&set->lock, flags);
+			spin_lock_bh(&set->lock);
 			set->waitcount--;
-			spin_unlock_irqrestore(&set->lock, flags);
+			spin_unlock_bh(&set->lock);
 			log_debug("read queue set interrupted");
 			return -EINTR;
 
 		}
 
-		spin_lock_irqsave(&set->lock, flags);
+		spin_lock_bh(&set->lock);
 		set->waitcount--;
 	}
-
 
 	port_id = set->queues[set->use & ((GAO_MAX_PORTS*GAO_MAX_PORT_HWQUEUE)-1)].port_id;
 	qid = set->queues[set->use & ((GAO_MAX_PORTS*GAO_MAX_PORT_HWQUEUE)-1)].id;
@@ -646,7 +649,7 @@ int32_t gao_queue_set_get(struct gao_queue_set* set, struct gao_hw_queue* hwq) {
 	set->set_queues[port_id][qid] = 0;
 	set->use++;
 
-	spin_unlock_irqrestore(&set->lock, flags);
+	spin_unlock_bh(&set->lock);
 	return 0;
 }
 
@@ -658,11 +661,10 @@ int32_t gao_queue_set_get(struct gao_queue_set* set, struct gao_hw_queue* hwq) {
  * @return -EAGAIN if there is no queue. 0 on success.
  */
 int32_t gao_queue_set_get_noblk(struct gao_queue_set* set, struct gao_hw_queue* hwq) {
-	unsigned long flags = 0;
 	int32_t	ret = -EAGAIN;
 	uint32_t port_id, qid;
 
-	spin_lock_irqsave(&set->lock, flags);
+	spin_lock_bh(&set->lock);
 
 	if(set->avail > set->use) {
 		port_id = set->queues[set->use & ((GAO_MAX_PORTS*GAO_MAX_PORT_HWQUEUE)-1)].port_id;
@@ -674,7 +676,7 @@ int32_t gao_queue_set_get_noblk(struct gao_queue_set* set, struct gao_hw_queue* 
 		ret = 0;
 	}
 
-	spin_unlock_irqrestore(&set->lock, flags);
+	spin_unlock_bh(&set->lock);
 	return ret;
 }
 
@@ -728,6 +730,7 @@ static  struct gao_descriptor_ring* gao_create_descriptor_ring(uint32_t order) {
 static void gao_free_rx_queue(struct gao_resources *resources, struct gao_rx_queue* queue) {
 	if(queue) {
 		log_debug("Freeing rx queue %u/%u", queue->port_id, queue->id);
+		if(queue->grid) gao_grid_return(&resources->grid_allocator, queue->grid);
 		gao_empty_descriptors(&resources->descriptor_allocator, &queue->ring);
 		kfree(queue);
 	}
@@ -748,7 +751,10 @@ static struct gao_rx_queue* gao_create_rx_queue(struct gao_resources *resources,
 	memset((void*)queue, 0, alloc_size);
 	spin_lock_init(&queue->lock);
 
-	if(gao_init_descriptor_ring(&queue->ring, order)) gao_error("Failed ot init descriptor ring");
+	queue->grid = gao_grid_get(&resources->grid_allocator);
+	if(!queue->grid) gao_error("Failed to get grid for queue");
+
+	if(gao_init_descriptor_ring(&queue->ring, order)) gao_error("Failed to init descriptor ring");
 
 	gao_refill_descriptors(&resources->descriptor_allocator, &queue->ring);
 	log_debug("Initial fill of ring got: use=%u avail=%u", queue->ring.use, queue->ring.avail);

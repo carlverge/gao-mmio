@@ -83,7 +83,7 @@ void gao_e1000e_alloc_rx_buffers(struct e1000_ring *rx_ring, int cleaned_count, 
  * @return
  */
 bool gao_e1000e_clean_rx_irq(struct e1000_ring *rx_ring, int *work_done, int work_to_do) {
-	//log_error("clean_rx_irq was called.");
+	gao_rx_clean(rx_ring->adapter->netdev->ifindex, 0);
 	return true;
 }
 
@@ -291,8 +291,8 @@ void	gao_e1000e_activate_port(struct net_device *netdev) {
 	gao_e1000e_init_rx_ring(adapter->rx_ring, port->rx_queues[0]);
 	gao_e1000e_init_tx_ring(adapter->tx_ring, port->tx_queues[0]);
 
-	gao_e1000e_enable_rx_intr(port->rx_queues[0]);
-	gao_e1000e_enable_tx_intr(port->tx_queues[0]);
+//	gao_e1000e_enable_rx_intr(port->rx_queues[0]);
+//	gao_e1000e_enable_tx_intr(port->tx_queues[0]);
 
 
 	port->state = GAO_RESOURCE_STATE_ACTIVE;
@@ -330,8 +330,8 @@ int64_t	gao_e1000e_deactivate_port(struct net_device *netdev) {
 	if(port->state == GAO_RESOURCE_STATE_UNUSED)
 		gao_error("Interface in unused state, cannot dectivate.");
 
-	_gao_e1000e_disable_rx_intr(adapter);
-	_gao_e1000e_disable_tx_intr(adapter);
+//	_gao_e1000e_disable_rx_intr(adapter);
+//	_gao_e1000e_disable_tx_intr(adapter);
 	gao_deactivate_port(port);
 
 	err:
